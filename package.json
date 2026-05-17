@@ -6,9 +6,9 @@
   "description": "Chrome Extension for real-time audio pitch shifting, BPM and key detection",
   "scripts": {
     "dev": "vite",
-    "build": "vite build && npm run build:postprocess",
+    "build": "vite build && npm run build:worklets && npm run build:postprocess",
     "build:worklets": "set VITE_ENTRY=pitch-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=bpm-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=key-processor&& vite build --config vite.worklets.config.ts",
-    "build:all": "npm run build && npm run build:worklets",
+    "build:all": "vite build && npm run build:worklets && npm run build:postprocess",
     "build:postprocess": "if exist dist\\src (copy dist\\src\\popup.html dist\\popup.html && copy dist\\src\\offscreen.html dist\\offscreen.html && rmdir /S /Q dist\\src) && (if not exist dist\\manifest.json copy src\\manifest.json dist\\manifest.json) && (if not exist dist\\icons xcopy /E /I /Y public\\icons dist\\icons\\)",
     "preview": "vite preview",
     "lint": "tsc --noEmit",

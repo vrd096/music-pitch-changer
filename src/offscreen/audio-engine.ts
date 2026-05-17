@@ -72,7 +72,7 @@ export class AudioEngine {
 
       this.mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          // @ts-expect-error - chromeMediaSource is a Chrome-specific constraint
+          // @ts-expect-error - Chrome-specific constraints for tab audio capture
           mandatory: {
             chromeMediaSource: 'tab',
             chromeMediaSourceId: streamId,

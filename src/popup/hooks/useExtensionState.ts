@@ -36,9 +36,9 @@ export function useExtensionState(): UseExtensionStateReturn {
         }
 
         case 'STATE_UPDATE': {
-          const newState = msg.payload as ExtensionState;
+          const newState = msg.payload as Partial<ExtensionState>;
           if (newState) {
-            setState(newState);
+            setState((prev) => ({ ...prev, ...newState }));
           }
           break;
         }

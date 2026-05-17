@@ -66,7 +66,7 @@ async function closeOffscreenDocument(): Promise<void> {
 
 async function captureTab(tabId: number): Promise<string> {
   const streamId = await new Promise<string>((resolve, reject) => {
-    chrome.tabCapture.getMediaStreamId({ consumerTabId: tabId }, (id) => {
+    chrome.tabCapture.getMediaStreamId({ targetTabId: tabId }, (id) => {
       if (chrome.runtime.lastError) {
         reject(new Error(chrome.runtime.lastError.message));
         return;
@@ -79,13 +79,14 @@ async function captureTab(tabId: number): Promise<string> {
 
 async function startCapture(tabId: number): Promise<void> {
   try {
+    // 1. Create offscreen document FIRST (needs time to initialize)
+    await ensureOffscreenDocument();
+    await new Promise((r) => setTimeout(r, 500));
+
+    // 2. Then get streamId with targetTabId (the tab to capture from)
     const streamId = await captureTab(tabId);
 
-    await ensureOffscreenDocument();
-
-    // Wait a bit for offscreen document to initialize
-    await new Promise((r) => setTimeout(r, 300));
-
+    // 3. Send streamId to offscreen document
     await sendToOffscreen(Messages.streamId(streamId));
 
     captureTabId = tabId;

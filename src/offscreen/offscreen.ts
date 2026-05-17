@@ -48,7 +48,7 @@ async function handleMessage(message: ExtensionMessage): Promise<void> {
     }
 
     default:
-      console.warn('[Offscreen] Unknown message type:', message.type);
+    // Ignore — runtime.sendMessage delivers to all extension pages
   }
 }
 

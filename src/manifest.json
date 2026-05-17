@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Music Pitch Changer",
+  "version": "1.0.0",
+  "description": "Real-time BPM / Key detection and pitch shifting for any browser audio (YouTube, Beatport, etc.)",
+  "permissions": ["tabCapture", "offscreen", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Music Pitch Changer",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

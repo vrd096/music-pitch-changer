@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Music Pitch Changer — Audio Processor</title>
+    <style>
+      body {
+        background: #0a0820;
+        color: #e2e8f0;
+        font-family: system-ui, sans-serif;
+        padding: 16px;
+        margin: 0;
+      }
+      #status {
+        font-size: 14px;
+      }
+      .active {
+        color: #4ade80;
+      }
+      .inactive {
+        color: #f87171;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="status" class="inactive">⏳ Offscreen document loaded. Waiting for stream...</div>
+    <script type="module" src="./offscreen.ts"></script>
+  </body>
+</html>

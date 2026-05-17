@@ -1,12 +1,24 @@
-import React, { useCallback } from 'react';
+import React, { useCallback, useMemo } from 'react';
 
 interface SpeedSliderProps {
   value: number; // 0.5 to 2.0
   onChange: (value: number) => void;
   disabled?: boolean;
+  /** Detected original BPM (used to display computed BPM value) */
+  bpm?: number | null;
 }
 
-export const SpeedSlider: React.FC<SpeedSliderProps> = ({ value, onChange, disabled = false }) => {
+const DEFAULT_BASE_BPM = 120;
+
+export const SpeedSlider: React.FC<SpeedSliderProps> = ({
+  value,
+  onChange,
+  disabled = false,
+  bpm = null,
+}) => {
+  const baseBpm = bpm ?? DEFAULT_BASE_BPM;
+  const currentBpm = Math.round(baseBpm * value);
+
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       onChange(parseFloat(e.target.value));
@@ -18,8 +30,20 @@ export const SpeedSlider: React.FC<SpeedSliderProps> = ({ value, onChange, disab
     onChange(1.0);
   }, [onChange]);
 
+  const adjustBpm = useCallback(
+    (delta: number) => {
+      const newBpm = currentBpm + delta;
+      const newSpeed = Math.max(0.5, Math.min(2.0, newBpm / baseBpm));
+      onChange(newSpeed);
+    },
+    [currentBpm, baseBpm, onChange],
+  );
+
   // Calculate percentage for visual feedback
   const percent = ((value - 0.5) / (2.0 - 0.5)) * 100;
+
+  const canDecrease = useMemo(() => currentBpm > Math.round(baseBpm * 0.5), [currentBpm, baseBpm]);
+  const canIncrease = useMemo(() => currentBpm < Math.round(baseBpm * 2.0), [currentBpm, baseBpm]);
 
   return (
     <div className={`transition-opacity ${disabled ? 'opacity-40' : ''}`}>
@@ -27,7 +51,7 @@ export const SpeedSlider: React.FC<SpeedSliderProps> = ({ value, onChange, disab
         <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Speed</label>
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-slate-200 tabular-nums">
-            {Math.round(value * 100)}%
+            {currentBpm} <span className="text-[10px] text-slate-500 font-normal">BPM</span>
           </span>
           <button
             onClick={handleReset}
@@ -54,10 +78,29 @@ export const SpeedSlider: React.FC<SpeedSliderProps> = ({ value, onChange, disab
           }}
         />
         <div className="flex justify-between text-[10px] text-slate-600 mt-1">
-          <span>50%</span>
-          <span>100%</span>
-          <span>200%</span>
+          <span>{Math.round(baseBpm * 0.5)} BPM</span>
+          <span>{baseBpm} BPM</span>
+          <span>{Math.round(baseBpm * 2.0)} BPM</span>
         </div>
+      </div>
+      {/* +/- Buttons */}
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={() => adjustBpm(-1)}
+          disabled={disabled || !canDecrease}
+          className="flex-1 text-xs py-1 rounded bg-white/5 text-slate-400
+            hover:bg-white/10 hover:text-slate-200 transition-colors
+            disabled:opacity-30 disabled:cursor-not-allowed">
+          −1 BPM
+        </button>
+        <button
+          onClick={() => adjustBpm(1)}
+          disabled={disabled || !canIncrease}
+          className="flex-1 text-xs py-1 rounded bg-white/5 text-slate-400
+            hover:bg-white/10 hover:text-slate-200 transition-colors
+            disabled:opacity-30 disabled:cursor-not-allowed">
+          +1 BPM
+        </button>
       </div>
     </div>
   );

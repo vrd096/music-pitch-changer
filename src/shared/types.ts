@@ -55,6 +55,8 @@ export type MessageType =
   | 'METRICS_UPDATE'
   | 'GET_STATE'
   | 'STATE_UPDATE'
+  | 'OFFSCREEN_READY'
+  | 'RESET_BPM'
   | 'ERROR';
 
 export interface ExtensionMessage<T = unknown> {

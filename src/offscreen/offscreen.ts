@@ -5,6 +5,13 @@ import { AudioEngine } from './audio-engine';
 
 let engine: AudioEngine | null = null;
 
+// Pre-emptively create AudioEngine and start preparation (AudioContext + worklets).
+// This runs as soon as the offscreen document loads — well before the user clicks Start.
+// When init() is called later, it skips AudioContext creation and worklet loading,
+// going straight to getUserMedia + graph connect. This eliminates ~1-3s of startup delay.
+engine = new AudioEngine();
+engine.prepare().catch((err) => console.warn('[Offscreen] Early prepare failed:', err));
+
 /* ===== Message Handling ===== */
 
 async function handleMessage(message: ExtensionMessage): Promise<void> {
@@ -13,6 +20,7 @@ async function handleMessage(message: ExtensionMessage): Promise<void> {
   switch (message.type) {
     case 'STREAM_ID': {
       const { streamId } = message.payload as { streamId: string };
+      // engine is always created (from top-level prepare), so this is just a safety check
       if (!engine) {
         engine = new AudioEngine();
       }
@@ -31,13 +39,15 @@ async function handleMessage(message: ExtensionMessage): Promise<void> {
     case 'KILL_AUDIO': {
       if (engine) {
         await engine.destroy();
-        engine = null;
+        // Don't null the engine — keep it for future init cycles.
+        // destroy() resets prepare state internally.
       }
       break;
     }
 
     case 'GET_STATE': {
-      // Respond with current capture state
+      // Respond with current capture state.
+      // engine is always created at top level (never null), but keep the check for safety.
       chrome.runtime
         .sendMessage({
           type: 'STATE_UPDATE',
@@ -78,4 +88,8 @@ window.addEventListener('beforeunload', () => {
   }
 });
 
+// Signal that the offscreen document is fully loaded and listeners are registered
+chrome.runtime
+  .sendMessage({ type: 'OFFSCREEN_READY', payload: {} } as ExtensionMessage)
+  .catch(() => {});
 console.log('[Offscreen] Document loaded and ready');

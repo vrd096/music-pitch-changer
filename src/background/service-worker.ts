@@ -60,6 +60,7 @@ async function closeOffscreenDocument(): Promise<void> {
   } catch {
     // Document may already be closed
   }
+  offscreenReady = false;
 }
 
 /* ===== Tab Capture ===== */
@@ -79,9 +80,8 @@ async function captureTab(tabId: number): Promise<string> {
 
 async function startCapture(tabId: number): Promise<void> {
   try {
-    // 1. Create offscreen document FIRST (needs time to initialize)
+    // 1. Create offscreen document FIRST
     await ensureOffscreenDocument();
-    await new Promise((r) => setTimeout(r, 500));
 
     // 2. Then get streamId with targetTabId (the tab to capture from)
     const streamId = await captureTab(tabId);
@@ -99,6 +99,9 @@ async function startCapture(tabId: number): Promise<void> {
     };
     await saveStateToStorage(state);
     startKeepAlive();
+
+    // Notify popup about state change
+    chrome.runtime.sendMessage(Messages.stateUpdate(state)).catch(() => {});
 
     console.log('[SW] Capture started for tab:', tabId);
   } catch (error) {
@@ -122,6 +125,9 @@ async function stopCapture(): Promise<void> {
     await saveStateToStorage(state);
     stopKeepAlive();
 
+    // Notify popup about state change
+    chrome.runtime.sendMessage(Messages.stateUpdate(state)).catch(() => {});
+
     console.log('[SW] Capture stopped');
   } catch (error) {
     console.error('[SW] Stop capture failed:', error);
@@ -130,7 +136,24 @@ async function stopCapture(): Promise<void> {
 
 /* ===== Offscreen Communication ===== */
 
+let offscreenReady = false;
+
+async function waitForOffscreenReady(timeout = 5000): Promise<void> {
+  if (offscreenReady) return;
+  const start = Date.now();
+  while (Date.now() - start < timeout) {
+    await new Promise((r) => setTimeout(r, 100));
+    if (offscreenReady) return;
+  }
+  console.warn('[SW] Offscreen ready timeout, proceeding anyway');
+}
+
 async function sendToOffscreen(message: ExtensionMessage): Promise<void> {
+  // For STREAM_ID, first wait for offscreen to be ready
+  if (message.type === 'STREAM_ID') {
+    await waitForOffscreenReady();
+  }
+
   try {
     await chrome.runtime.sendMessage(message);
   } catch {
@@ -181,7 +204,19 @@ async function handleMessage(
     }
 
     case 'GET_STATE': {
+      // Popup opened — pre-emptively create offscreen document.
+      // This triggers engine.prepare() in the offscreen doc, so by the time
+      // the user clicks Start, AudioContext and worklets are already ready.
+      // This eliminates ~1-3s of startup delay.
+      ensureOffscreenDocument().catch(() => {});
       sendResponse(state);
+      break;
+    }
+
+    case 'OFFSCREEN_READY': {
+      offscreenReady = true;
+      console.log('[SW] Offscreen document ready');
+      sendResponse({ success: true });
       break;
     }
 
@@ -217,6 +252,12 @@ chrome.runtime.onConnect.addListener((port) => {
         const metrics = message.payload as AudioMetrics;
         state = { ...state, metrics };
         saveStateToStorage(state);
+
+        // Forward METRICS_UPDATE to popup (if open)
+        chrome.runtime.sendMessage(message).catch(() => {});
+      } else if (message.type === 'OFFSCREEN_READY') {
+        offscreenReady = true;
+        console.log('[SW] Offscreen document ready (via port)');
       }
     });
 

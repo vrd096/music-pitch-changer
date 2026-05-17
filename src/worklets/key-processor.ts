@@ -98,9 +98,24 @@ class KeyProcessor extends AudioWorkletProcessor {
     this.buffer[1] = new Float32Array(this.bufferSize);
   }
 
-  process(inputs: Float32Array[][], _outputs: Float32Array[][]): boolean {
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const input = inputs[0];
     if (!input || input.length === 0 || !input[0]) return true;
+
+    // Passthrough: copy input to output so Chrome doesn't optimize away
+    // process() calls for analysis-only nodes.
+    const output = outputs[0];
+    if (output && output.length > 0) {
+      for (let ch = 0; ch < Math.min(input.length, output.length); ch++) {
+        const ic = input[ch];
+        const oc = output[ch];
+        if (ic && oc) {
+          for (let s = 0; s < ic.length; s++) {
+            oc[s] = ic[s];
+          }
+        }
+      }
+    }
 
     const channelData = input[0];
 

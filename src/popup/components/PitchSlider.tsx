@@ -18,6 +18,14 @@ export const PitchSlider: React.FC<PitchSliderProps> = ({ value, onChange, disab
     onChange(0);
   }, [onChange]);
 
+  const adjust = useCallback(
+    (delta: number) => {
+      const newValue = Math.max(-12, Math.min(12, value + delta));
+      onChange(newValue);
+    },
+    [value, onChange],
+  );
+
   // Calculate percentage for visual feedback
   const percent = ((value + 12) / 24) * 100;
 
@@ -27,7 +35,8 @@ export const PitchSlider: React.FC<PitchSliderProps> = ({ value, onChange, disab
         <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Pitch</label>
         <div className="flex items-center gap-2">
           <span className="text-sm font-semibold text-slate-200 tabular-nums">
-            {value > 0 ? `+${value}` : value} st
+            {value > 0 ? `+${value}` : value}{' '}
+            <span className="text-[10px] text-slate-500 font-normal">st</span>
           </span>
           <button
             onClick={handleReset}
@@ -58,6 +67,25 @@ export const PitchSlider: React.FC<PitchSliderProps> = ({ value, onChange, disab
           <span>0</span>
           <span>+12</span>
         </div>
+      </div>
+      {/* +/- Buttons */}
+      <div className="flex gap-2 mt-2">
+        <button
+          onClick={() => adjust(-1)}
+          disabled={disabled || value <= -12}
+          className="flex-1 text-xs py-1 rounded bg-white/5 text-slate-400
+            hover:bg-white/10 hover:text-slate-200 transition-colors
+            disabled:opacity-30 disabled:cursor-not-allowed">
+          −1 st
+        </button>
+        <button
+          onClick={() => adjust(1)}
+          disabled={disabled || value >= 12}
+          className="flex-1 text-xs py-1 rounded bg-white/5 text-slate-400
+            hover:bg-white/10 hover:text-slate-200 transition-colors
+            disabled:opacity-30 disabled:cursor-not-allowed">
+          +1 st
+        </button>
       </div>
     </div>
   );

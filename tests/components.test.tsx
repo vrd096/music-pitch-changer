@@ -92,7 +92,7 @@ describe('KeyDisplay', () => {
 });
 
 describe('SpeedSlider', () => {
-  it('should render with correct initial value', () => {
+  it('should render with correct initial value (default 120 BPM)', () => {
     const onChange = vi.fn();
 
     render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
@@ -100,6 +100,28 @@ describe('SpeedSlider', () => {
     const slider = screen.getByRole('slider');
     expect(slider).toBeInTheDocument();
     expect(slider).not.toBeDisabled();
+    expect(slider).toHaveValue('1');
+    // Default base BPM = 120, speed 1.0 → 120 BPM
+    expect(screen.getByText('120')).toBeInTheDocument();
+    expect(screen.getByText('BPM')).toBeInTheDocument();
+  });
+
+  it('should display correct BPM when value changes', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.5} onChange={onChange} disabled={false} />);
+
+    // 120 * 1.5 = 180 BPM
+    expect(screen.getByText('180')).toBeInTheDocument();
+  });
+
+  it('should display computed BPM when original BPM is known', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} bpm={140} />);
+
+    // 140 * 1.0 = 140 BPM
+    expect(screen.getByText('140')).toBeInTheDocument();
   });
 
   it('should be disabled when disabled prop is true', () => {
@@ -108,6 +130,35 @@ describe('SpeedSlider', () => {
     render(<SpeedSlider value={1.0} onChange={onChange} disabled={true} />);
 
     expect(screen.getByRole('slider')).toBeDisabled();
+  });
+
+  it('should render +/- BPM buttons', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+
+    expect(screen.getByText('−1 BPM')).toBeInTheDocument();
+    expect(screen.getByText('+1 BPM')).toBeInTheDocument();
+  });
+
+  it('should call onChange with adjusted speed when +1 BPM clicked', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+
+    // 120 * 1.0 = 120 BPM, +1 → 121 BPM → 121/120 ≈ 1.0083
+    fireEvent.click(screen.getByText('+1 BPM'));
+    expect(onChange).toHaveBeenCalledWith(121 / 120);
+  });
+
+  it('should call onChange with adjusted speed when −1 BPM clicked', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+
+    // 120 * 1.0 = 120 BPM, -1 → 119 BPM → 119/120 ≈ 0.9917
+    fireEvent.click(screen.getByText('−1 BPM'));
+    expect(onChange).toHaveBeenCalledWith(119 / 120);
   });
 });
 
@@ -120,6 +171,55 @@ describe('PitchSlider', () => {
     const slider = screen.getByRole('slider');
     expect(slider).toBeInTheDocument();
     expect(slider).not.toBeDisabled();
+    // Use getAllByText and check the value display span exists
+    const valueSpans = screen.getAllByText('0');
+    expect(valueSpans.length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('st', { selector: 'span' })).toBeInTheDocument();
+  });
+
+  it('should render +/- semitone buttons', () => {
+    const onChange = vi.fn();
+
+    render(<PitchSlider value={0} onChange={onChange} disabled={false} />);
+
+    expect(screen.getByText('−1 st')).toBeInTheDocument();
+    expect(screen.getByText('+1 st')).toBeInTheDocument();
+  });
+
+  it('should call onChange with +1 when +1 st clicked', () => {
+    const onChange = vi.fn();
+
+    render(<PitchSlider value={3} onChange={onChange} disabled={false} />);
+
+    fireEvent.click(screen.getByText('+1 st'));
+    expect(onChange).toHaveBeenCalledWith(4);
+  });
+
+  it('should call onChange with -1 when −1 st clicked', () => {
+    const onChange = vi.fn();
+
+    render(<PitchSlider value={3} onChange={onChange} disabled={false} />);
+
+    fireEvent.click(screen.getByText('−1 st'));
+    expect(onChange).toHaveBeenCalledWith(2);
+  });
+
+  it('should clamp value at lower bound -12', () => {
+    const onChange = vi.fn();
+
+    render(<PitchSlider value={-12} onChange={onChange} disabled={false} />);
+
+    // Button should be disabled at -12
+    expect(screen.getByText('−1 st')).toBeDisabled();
+  });
+
+  it('should clamp value at upper bound +12', () => {
+    const onChange = vi.fn();
+
+    render(<PitchSlider value={12} onChange={onChange} disabled={false} />);
+
+    // Button should be disabled at +12
+    expect(screen.getByText('+1 st')).toBeDisabled();
   });
 });
 

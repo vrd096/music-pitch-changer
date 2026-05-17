@@ -73,9 +73,29 @@ class BPMProcessor extends AudioWorkletProcessor {
 
   /* ===== BPM smoothing ===== */
 
-  private readonly BPM_HISTORY_SIZE = 7;
+  /** Размер буфера для медианного фильтра */
+  private readonly BPM_HISTORY_SIZE = 11;
+  /** Минимальное кол-во записей в истории для первого репорта */
+  private readonly MIN_REPORT_HISTORY = 5;
   private bpmHistory: number[] = [];
   private lastReportedBpm = 0;
+
+  /** Минимальное изменение BPM для репорта (убирает джиттер квантования) */
+  private readonly MIN_REPORT_DELTA = 2;
+
+  /** Минимальный confidence для принятия raw BPM */
+  private readonly MIN_BPM_CONFIDENCE = 0.2;
+
+  /**
+   * Порог soft lock: если raw BPM отличается от lastReportedBpm на
+   * SOFT_LOCK_MIN..SOFT_LOCK_MAX BPM, подтягиваем к lastReportedBpm
+   * (если confidence недостаточно высок, чтобы оправдать переключение).
+   *
+   * SOFT_LOCK_MAX=80 покрывает октавные скачки (напр. 125→167, diff=42).
+   */
+  private readonly SOFT_LOCK_MIN = 3;
+  private readonly SOFT_LOCK_MAX = 80;
+  private readonly SOFT_LOCK_CONFIDENCE = 0.55;
 
   constructor(options: AudioWorkletNodeOptions) {
     super();
@@ -99,9 +119,25 @@ class BPMProcessor extends AudioWorkletProcessor {
 
   /* ===== Process ===== */
 
-  process(inputs: Float32Array[][], _outputs: Float32Array[][]): boolean {
+  process(inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
     const input = inputs[0];
     if (!input || input.length === 0) return true;
+
+    // Passthrough: copy input to output so Chrome doesn't optimize away
+    // process() calls for analysis-only nodes, and downstream nodes (key, pitch)
+    // receive audio.
+    const output = outputs[0];
+    if (output && output.length > 0) {
+      for (let ch = 0; ch < Math.min(input.length, output.length); ch++) {
+        const ic = input[ch];
+        const oc = output[ch];
+        if (ic && oc) {
+          for (let s = 0; s < ic.length; s++) {
+            oc[s] = ic[s];
+          }
+        }
+      }
+    }
 
     const channelData = input[0];
     if (!channelData) return true;
@@ -152,10 +188,13 @@ class BPMProcessor extends AudioWorkletProcessor {
     const result = this.estimateBPM();
     if (!result) return;
 
+    // -- Confidence gate: skip very unreliable results --
+    if (result.confidence < this.MIN_BPM_CONFIDENCE) return;
+
     // -- Track-change detection: if a high-confidence BPM differs significantly
     //    from the last reported BPM, reset history to adapt faster. --
     const TRACK_CHANGE_CONFIDENCE = 0.4;
-    const TRACK_CHANGE_THRESHOLD = 15; // BPM difference
+    const TRACK_CHANGE_THRESHOLD = 15;
     if (
       result.confidence >= TRACK_CHANGE_CONFIDENCE &&
       this.lastReportedBpm > 0 &&
@@ -169,8 +208,26 @@ class BPMProcessor extends AudioWorkletProcessor {
       this.bpmHistory = [result.bpm];
     }
 
+    // -- Soft lock: if a stable BPM is established and raw BPM drifts
+    //    moderately with low confidence, pull it toward the locked value.
+    //    Condition `history >= 3` lets lock work immediately after a few
+    //    measurements instead of waiting for full BPM_HISTORY_SIZE (11).
+    let bpmToPush = result.bpm;
+    if (this.lastReportedBpm > 0 && this.bpmHistory.length >= 3) {
+      const diff = result.bpm - this.lastReportedBpm;
+      const absDiff = Math.abs(diff);
+
+      if (absDiff >= this.SOFT_LOCK_MIN && absDiff < this.SOFT_LOCK_MAX) {
+        // Moderate deviation — apply soft lock if confidence isn't high enough
+        if (result.confidence < this.SOFT_LOCK_CONFIDENCE) {
+          // Pull raw BPM halfway toward locked value (50% instead of 30%)
+          bpmToPush = this.lastReportedBpm + Math.round(diff * 0.5);
+        }
+      }
+    }
+
     // Median filter for stability
-    this.bpmHistory.push(result.bpm);
+    this.bpmHistory.push(bpmToPush);
     if (this.bpmHistory.length > this.BPM_HISTORY_SIZE) {
       this.bpmHistory.shift();
     }
@@ -178,22 +235,24 @@ class BPMProcessor extends AudioWorkletProcessor {
     const stableBpm = this.getMedian(this.bpmHistory);
 
     console.log(
-      `[BPM] raw=${result.bpm}, stable=${Math.round(stableBpm)}, ` +
+      `[BPM] raw=${result.bpm}, push=${bpmToPush}, stable=${Math.round(stableBpm)}, ` +
         `conf=${result.confidence.toFixed(2)}`,
     );
 
-    // Report BPM whenever it's stable, in range, and changed.
-    // Only report when bpmHistory is full (for initial stability).
+    // -- Reporting with dead zone: don't report tiny fluctuations --
+    const reportedBpm = Math.round(stableBpm);
+    const bpmDelta = Math.abs(reportedBpm - this.lastReportedBpm);
+
     if (
-      stableBpm >= this.MIN_BPM &&
-      stableBpm <= this.MAX_BPM &&
-      this.bpmHistory.length >= this.BPM_HISTORY_SIZE &&
-      Math.round(stableBpm) !== this.lastReportedBpm
+      reportedBpm >= this.MIN_BPM &&
+      reportedBpm <= this.MAX_BPM &&
+      this.bpmHistory.length >= this.MIN_REPORT_HISTORY &&
+      bpmDelta > this.MIN_REPORT_DELTA
     ) {
-      this.lastReportedBpm = Math.round(stableBpm);
+      this.lastReportedBpm = reportedBpm;
       this.port.postMessage({
         type: 'bpm',
-        bpm: Math.round(stableBpm),
+        bpm: reportedBpm,
         confidence: Math.min(result.confidence, 1),
       });
     }
@@ -275,17 +334,62 @@ class BPMProcessor extends AudioWorkletProcessor {
     // -- Octave bias: prefer higher BPM when there's a strong peak at double frequency --
     // Electronic music often has a strong downbeat every 2 beats (half-time feel).
     // Autocorrelation may pick the half-time lag as strongest. We check if a peak
-    // at ~half the bestLag (double BPM) has >85% correlation and prefer it.
+    // at ~half the bestLag (double BPM) has >60% correlation and prefer it.
+    // For onset signals the quarter-note peak is often much weaker than half-time,
+    // so a lower threshold (0.60) is needed vs the default 0.85 used elsewhere.
     for (let lag = minLag; lag <= maxLag; lag++) {
       if (lag === bestLag) continue;
       const ratio = bestLag / lag;
-      // Check for exact 2:1 or 3:2 ratio (full/half or triple/duple feel)
-      if (Math.abs(ratio - 2.0) < 0.2 || Math.abs(ratio - 1.5) < 0.15) {
+      // Check for 2:1 ratio (octave correction — halved BPM)
+      if (Math.abs(ratio - 2.0) < 0.25) {
+        const corr = correlations[lag - minLag];
+        if (corr > maxCorr * 0.6) {
+          bestLag = lag;
+          maxCorr = corr;
+        }
+      }
+      // Check for 3:2 ratio (triple/duple feel) — more conservative threshold
+      if (Math.abs(ratio - 1.5) < 0.15) {
         const corr = correlations[lag - minLag];
         if (corr > maxCorr * 0.85) {
           bestLag = lag;
           maxCorr = corr;
         }
+      }
+    }
+
+    // -- Second pass: if BPM still below 70, force octave-up --
+    // This catches cases where the half-time peak is so dominant that even
+    // the 60% threshold doesn't find the quarter-note candidate.
+    const bpmFromBest = (energyRate * 60) / bestLag;
+    if (bpmFromBest < 70) {
+      const halfLag = Math.round(bestLag / 2);
+      if (halfLag >= minLag && halfLag <= maxLag) {
+        const corr = correlations[halfLag - minLag];
+        if (corr > maxCorr * 0.4) {
+          bestLag = halfLag;
+          maxCorr = corr;
+        }
+      }
+    }
+
+    // -- Third pass: if BPM still below MIN_BPM, search for the strongest
+    // peak in the upper half of the range (BPM > 100) --
+    const bpmFromBest2 = (energyRate * 60) / bestLag;
+    if (bpmFromBest2 < this.MIN_BPM) {
+      let altBestLag = 0;
+      let altMaxCorr = 0;
+      const midLag = Math.round((minLag + maxLag) / 2);
+      for (let lag = minLag; lag <= midLag; lag++) {
+        const corr = correlations[lag - minLag];
+        if (corr > altMaxCorr) {
+          altMaxCorr = corr;
+          altBestLag = lag;
+        }
+      }
+      if (altBestLag > 0 && altMaxCorr > this.MIN_PEAK) {
+        bestLag = altBestLag;
+        maxCorr = altMaxCorr;
       }
     }
 

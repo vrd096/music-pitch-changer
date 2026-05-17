@@ -68,9 +68,9 @@ describe('BpmDisplay', () => {
     expect(screen.getByText('128')).toBeInTheDocument();
   });
 
-  it('should display ellipsis when capturing without BPM', () => {
+  it('should display loading state when capturing without BPM', () => {
     render(<BpmDisplay bpm={null} isCapturing={true} />);
-    expect(screen.getByText('···')).toBeInTheDocument();
+    expect(screen.getByText('Detecting')).toBeInTheDocument();
   });
 });
 
@@ -85,9 +85,9 @@ describe('KeyDisplay', () => {
     expect(screen.getByText('C major')).toBeInTheDocument();
   });
 
-  it('should display ellipsis when capturing without key', () => {
+  it('should display loading state when capturing without key', () => {
     render(<KeyDisplay keyValue={null} confidence={null} isCapturing={true} />);
-    expect(screen.getByText('···')).toBeInTheDocument();
+    expect(screen.getByText('Detecting')).toBeInTheDocument();
   });
 });
 

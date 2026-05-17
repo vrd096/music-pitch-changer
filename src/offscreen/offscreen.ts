@@ -46,12 +46,21 @@ async function handleMessage(message: ExtensionMessage): Promise<void> {
     }
 
     case 'GET_STATE': {
-      // Respond with current capture state.
-      // engine is always created at top level (never null), but keep the check for safety.
+      // Respond with current capture state + last known metrics.
+      // Важно: bpm/key передаются ВНУТРИ metrics, т.к. popup читает metrics.bpm / metrics.key.
+      const state = engine?.getState() ?? {};
       chrome.runtime
         .sendMessage({
           type: 'STATE_UPDATE',
-          payload: { isCapturing: engine !== null },
+          payload: {
+            isCapturing: state.isCapturing ?? false,
+            metrics: {
+              bpm: state.bpm ?? null,
+              key: state.key ?? null,
+              confidence: state.confidence ?? null,
+              frequency: state.frequency ?? null,
+            },
+          },
         })
         .catch(() => {});
       break;

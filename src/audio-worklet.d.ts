@@ -16,6 +16,9 @@ declare class AudioWorkletProcessor {
 
 declare function registerProcessor(name: string, processorCtor: typeof AudioWorkletProcessor): void;
 
+/** Доступен как глобал в AudioWorklet */
+declare var sampleRate: number;
+
 interface AudioWorkletNodeOptions {
   numberOfInputs?: number;
   numberOfOutputs?: number;

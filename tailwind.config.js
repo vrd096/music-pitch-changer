@@ -18,6 +18,14 @@ export default {
       },
       animation: {
         'pulse-slow': 'pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite',
+        'loading-bar': 'loading-bar 1.5s ease-in-out infinite',
+      },
+      keyframes: {
+        'loading-bar': {
+          '0%': { transform: 'translateX(-100%)' },
+          '50%': { transform: 'translateX(200%)' },
+          '100%': { transform: 'translateX(400%)' },
+        },
       },
     },
   },

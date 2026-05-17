@@ -12,6 +12,7 @@ const entries: Record<string, string> = {
   'pitch-processor': resolve(__dirname, 'src/worklets/pitch-processor.ts'),
   'bpm-processor': resolve(__dirname, 'src/worklets/bpm-processor.ts'),
   'key-processor': resolve(__dirname, 'src/worklets/key-processor.ts'),
+  'capture-processor': resolve(__dirname, 'src/worklets/capture-processor.ts'),
 };
 
 export default defineConfig({

@@ -1,44 +1,50 @@
 import type { AudioParams, AudioMetrics, ExtensionMessage } from '../shared/types';
 import { DEFAULT_AUDIO_PARAMS } from '../shared/types';
 import { Messages } from '../shared/messaging';
+import { KeyAnalyzer } from './key-analyzer';
+import { BpmAnalyzer } from './bpm-analyzer';
 
 /**
  * AudioEngine — core audio processing pipeline.
  * Runs inside the Offscreen Document.
  *
- * Two-phase initialization:
- *   Phase 1 (bypass): Source → Gain → Destination (instant audio, no silence)
- *   Phase 2 (full):   Source → BPM → Key → Pitch → Gain → Destination
+ * Двухфазная инициализация:
+ *   Phase 1 (bypass): Source → outputGain → Destination (мгновенный звук, без тишины)
+ *   Phase 2 (upgrade): Source → capture → Pitch → outputGain → Destination
  *
- * Phase 1 ensures the user hears audio immediately after getUserMedia resolves.
- * Phase 2 upgrades the graph once worklets finish loading — the disconnect/reconnect
- * happens synchronously in one microtask, so no audible gap occurs.
+ * Phase 1: пользователь слышит аудио сразу после getUserMedia.
+ * Phase 2: бесшовная замена графа (disconnect/reconnect в одном микротаске).
  *
- * Analysis nodes (BPM, Key) have passthrough (input → output) and are
- * placed IN the audio chain so Chrome MUST call AudioWorkletProcessor.process()
- * for them. This is the only reliable way to ensure analysis runs.
+ * Анализ BPM и KEY вынесены из AudioWorklet на main (offscreen) thread:
+ *   - BpmAnalyzer: peak detection + BPM вычисление через realtime-bpm-analyzer
+ *   - KeyAnalyzer: Radix-2 FFT → chromagram → корреляция с Krumhansl-Schmuckler
  *
- * BPM and Key detection run inside AudioWorklets for precise audio-thread timing.
+ * Это исключает блокировку audio thread тяжёлыми вычислениями
+ * и предотвращает audio break'и.
+ *
+ * CaptureProcessor передаёт аудио-чанки в оба анализатора через port.onmessage.
  */
 export class AudioEngine {
   private ctx: AudioContext | null = null;
   private sourceNode: MediaStreamAudioSourceNode | null = null;
   private pitchNode: AudioWorkletNode | null = null;
-  private bpmNode: AudioWorkletNode | null = null;
-  private keyNode: AudioWorkletNode | null = null;
-  /** Output gain — always connected to destination, shared between bypass/full graph */
+  private captureNode: AudioWorkletNode | null = null;
+  /** BPM detection on main thread (offscreen) — не блокирует audio thread */
+  private bpmAnalyzer: BpmAnalyzer | null = null;
+  /** Key detection on main thread (offscreen) — не блокирует audio thread */
+  private keyAnalyzer: KeyAnalyzer | null = null;
+  /** Output gain — всегда подключён к destination, общий для bypass/full graph */
   private outputGain: GainNode | null = null;
 
   private params: AudioParams = { ...DEFAULT_AUDIO_PARAMS };
   private isRunning = false;
   private mediaStream: MediaStream | null = null;
 
+  /** Последние отправленные метрики — для GET_STATE при переоткрытии popup */
+  private lastMetrics: Partial<AudioMetrics> = {};
+
   // Port for communicating with the service worker
   private port: chrome.runtime.Port | null = null;
-
-  // BPM smoothing state (from worklet messages)
-  private bpmHistory: number[] = [];
-  private readonly BPM_HISTORY_SIZE = 5;
 
   /** Pre-emptive preparation state */
   private prepared = false;
@@ -129,9 +135,6 @@ export class AudioEngine {
       await this.destroy();
     }
 
-    // Reset BPM history on fresh start
-    this.bpmHistory = [];
-
     try {
       // Ensure AudioContext + worklets are prepared.
       // If prepare() was called early (e.g. when offscreen doc loaded), this is instant.
@@ -164,14 +167,34 @@ export class AudioEngine {
       this.sourceNode = ctx.createMediaStreamSource(this.mediaStream);
 
       // ===== Phase 1: Bypass graph =====
-      // Connect Source → Gain → Destination IMMEDIATELY so the user hears audio.
+      // Connect Source → outputGain → Destination IMMEDIATELY so the user hears audio.
       // Worklets are ALREADY LOADED (from prepare()), so we upgrade right after.
       this.buildBypassGraph();
       this.isRunning = true;
 
       console.log('[AE] Bypass graph active — audio is playing');
       this.updateStatus('active', 'Processing audio...');
-      this.reportMetrics({ bpm: null, key: null, confidence: null, isCapturing: true });
+      this.reportMetrics({
+        bpm: null,
+        key: null,
+        confidence: null,
+        frequency: null,
+        isCapturing: true,
+      });
+
+      // Create KeyAnalyzer (main-thread key detection) before upgradeGraph
+      // так как upgradeGraph подключает captureNode.port.onmessage →
+      // KeyAnalyzer.addChunk() и вызывает keyAnalyzer.start()
+      this.keyAnalyzer = new KeyAnalyzer(ctx.sampleRate);
+      this.keyAnalyzer.setCallback((result) => {
+        this.handleKeyResult(result.key, result.confidence);
+      });
+
+      // Create BpmAnalyzer (main-thread BPM detection) — тоже до upgradeGraph
+      this.bpmAnalyzer = new BpmAnalyzer(ctx.sampleRate);
+      this.bpmAnalyzer.setCallback((result) => {
+        this.handleBpmResult(result.bpm, result.confidence);
+      });
 
       // ===== Phase 2: Upgrade to full graph =====
       // Worklets are already loaded from prepare() — upgrade immediately.
@@ -180,8 +203,9 @@ export class AudioEngine {
       console.log('[AE] Audio engine initialized successfully');
       console.log('[AE] Active nodes:', {
         pitch: !!this.pitchNode,
-        bpm: !!this.bpmNode,
-        key: !!this.keyNode,
+        capture: !!this.captureNode,
+        bpmAnalyzer: !!this.bpmAnalyzer,
+        keyAnalyzer: !!this.keyAnalyzer,
       });
 
       // Send ready signal to service worker
@@ -198,9 +222,11 @@ export class AudioEngine {
   private async loadWorklets(): Promise<void> {
     if (!this.ctx) throw new Error('AudioContext not initialized');
 
+    // key-processor.js загружать не нужно — KeyAnalyzer работает на main thread
+    // (см. key-analyzer.ts). Worklet загружается только если ключ детектится
+    // внутри AudioWorklet (запасной вариант / будущая оптимизация).
     const worklets = [
-      { name: 'bpm-processor', file: '/worklets/bpm-processor.js' },
-      { name: 'key-processor', file: '/worklets/key-processor.js' },
+      { name: 'capture-processor', file: '/worklets/capture-processor.js' },
       { name: 'pitch-processor', file: '/worklets/pitch-processor.js' },
     ];
 
@@ -217,7 +243,7 @@ export class AudioEngine {
   /* ===== Audio Graph ===== */
 
   /**
-   * Phase 1: Build bypass graph — Source → Gain → Destination.
+   * Phase 1: Build bypass graph — Source → outputGain → Destination.
    * Called immediately after getUserMedia so the user hears audio without delay.
    * Worklets are loaded in the background, then upgradeGraph() is called.
    */
@@ -236,7 +262,14 @@ export class AudioEngine {
   /**
    * Phase 2: Upgrade from bypass to full processing graph.
    * Disconnects source from outputGain, inserts worklet nodes:
-   *   Source → BPM → Key → Pitch → Gain → Destination
+   *   Source → capture (passthrough) → Pitch → outputGain → Destination
+   *
+   * Анализ BPM и KEY вынесены на main (offscreen) thread:
+   *   - BpmAnalyzer: peak detection через realtime-bpm-analyzer
+   *   - KeyAnalyzer: Radix-2 FFT → chromagram → корреляция
+   *
+   * CaptureProcessor передаёт аудио-чанки через port.onmessage
+   * напрямую в оба анализатора (addChunk()).
    *
    * The disconnect/reconnect happens synchronously — no audible gap.
    */
@@ -246,38 +279,27 @@ export class AudioEngine {
       return;
     }
 
-    // 1. BPM detection node (passthrough + analysis)
+    // 1. Capture node (passthrough — передаёт аудио дальше по графу)
+    //    Также отправляет копии аудио-чанков в main thread для KeyAnalyzer и BpmAnalyzer.
     try {
-      this.bpmNode = new AudioWorkletNode(this.ctx, 'bpm-processor', {
+      this.captureNode = new AudioWorkletNode(this.ctx, 'capture-processor', {
         numberOfInputs: 1,
         numberOfOutputs: 1,
-        processorOptions: { sampleRate: this.ctx.sampleRate },
       });
-      this.bpmNode.port.onmessage = (event: MessageEvent) => {
-        if (event.data?.type === 'bpm') {
-          console.log('[AE] BPM result from worklet:', event.data.bpm);
-          this.handleBpmResult(event.data.bpm);
+      // Получаем аудио-чанки от capture-processor и передаём в оба анализатора
+      this.captureNode.port.onmessage = (event: MessageEvent) => {
+        if (event.data?.type === 'audio' && event.data.samples instanceof Float32Array) {
+          this.keyAnalyzer?.addChunk(event.data.samples);
+          this.bpmAnalyzer?.addChunk(event.data.samples);
         }
       };
     } catch (e) {
-      console.warn('[AE] BPM worklet node creation failed:', e);
+      console.warn('[AE] Capture worklet node creation failed:', e);
     }
 
-    // 2. Key detection node (passthrough + analysis)
-    try {
-      this.keyNode = new AudioWorkletNode(this.ctx, 'key-processor', {
-        numberOfInputs: 1,
-        numberOfOutputs: 1,
-        processorOptions: { sampleRate: this.ctx.sampleRate },
-      });
-      this.keyNode.port.onmessage = (event: MessageEvent) => {
-        if (event.data?.type === 'key') {
-          this.handleKeyResult(event.data.key, event.data.confidence);
-        }
-      };
-    } catch (e) {
-      console.warn('[AE] Key worklet node creation failed:', e);
-    }
+    // 2. Key + BPM detection — НЕ в AudioWorklet, а в KeyAnalyzer и BpmAnalyzer (main thread)
+    //    (Инициализируются в init() до вызова upgradeGraph())
+    //    CaptureProcessor отправляет аудио-чанки через port.onmessage (см. выше).
 
     // 3. Pitch shifting node
     try {
@@ -296,17 +318,14 @@ export class AudioEngine {
     // 4. Disconnect source from bypass (synchronous — no audible gap)
     this.sourceNode.disconnect();
 
-    // 5. Rebuild chain: Source → BPM → Key → Pitch → outputGain → Destination
-    // outputGain is already connected to destination from Phase 1.
+    // 5. Rebuild chain: Source → capture → Pitch → outputGain → Destination
+    //    outputGain is already connected to destination from Phase 1.
+    //    BPM и KEY анализируются на main thread, не в audio chain.
     let currentNode: AudioNode = this.sourceNode;
 
-    if (this.bpmNode) {
-      currentNode.connect(this.bpmNode);
-      currentNode = this.bpmNode;
-    }
-    if (this.keyNode) {
-      currentNode.connect(this.keyNode);
-      currentNode = this.keyNode;
+    if (this.captureNode) {
+      currentNode.connect(this.captureNode);
+      currentNode = this.captureNode;
     }
     if (this.pitchNode) {
       currentNode.connect(this.pitchNode);
@@ -319,6 +338,9 @@ export class AudioEngine {
     this.applyParams(this.params);
 
     console.log('[AE] Graph upgraded to full processing chain');
+
+    // Start periodic key analysis
+    this.keyAnalyzer?.start();
   }
 
   /* ===== Parameter Updates ===== */
@@ -336,28 +358,7 @@ export class AudioEngine {
     });
   }
 
-  /* ===== BPM / Key Result Handlers ===== */
-
-  private handleBpmResult(bpm: number): void {
-    // Validate range
-    if (bpm < 50 || bpm > 200) {
-      console.log(`[AE] BPM out of range: ${bpm}`);
-      return;
-    }
-
-    this.bpmHistory.push(bpm);
-    if (this.bpmHistory.length > this.BPM_HISTORY_SIZE) {
-      this.bpmHistory.shift();
-    }
-
-    const stableBpm = this.median(this.bpmHistory);
-    const rounded = Math.round(stableBpm);
-    console.log(`[AE] BPM: ${rounded} (raw: ${bpm}, history: [${this.bpmHistory.join(',')}])`);
-    this.reportMetrics({
-      bpm: rounded,
-      isCapturing: true,
-    });
-  }
+  /* ===== Result Handlers ===== */
 
   private handleKeyResult(key: string, confidence: number): void {
     console.log(`[AE] Key result: ${key} (confidence: ${confidence})`);
@@ -368,26 +369,42 @@ export class AudioEngine {
     });
   }
 
+  private handleBpmResult(bpm: number, confidence: number): void {
+    console.log(`[AE] BPM result: ${bpm} (confidence: ${confidence})`);
+    this.reportMetrics({
+      bpm,
+      confidence: Math.min(confidence, 1),
+      isCapturing: true,
+    });
+  }
+
   /* ===== Metrics Reporting ===== */
 
   private reportMetrics(metrics: Partial<AudioMetrics>): void {
+    // Merge с предыдущим lastMetrics — чтобы key не терялся при обновлении bpm
+    // и наоборот (например, handleBpmResult → reportMetrics({ bpm }) не стирает key)
+    this.lastMetrics = {
+      ...this.lastMetrics,
+      ...metrics,
+      isCapturing: metrics.isCapturing ?? this.isRunning,
+    };
     this.postMessage(
       Messages.metricsUpdate({
         bpm: metrics.bpm ?? null,
         key: metrics.key ?? null,
         confidence: metrics.confidence ?? null,
+        frequency: metrics.frequency ?? null,
         isCapturing: metrics.isCapturing ?? this.isRunning,
       }),
     );
   }
 
-  /* ===== Utilities ===== */
-
-  private median(values: number[]): number {
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+  /** Возвращает последние известные метрики — используется при GET_STATE */
+  getState(): Partial<AudioMetrics> {
+    return { ...this.lastMetrics };
   }
+
+  /* ===== Utilities ===== */
 
   private updateStatus(className: string, text: string): void {
     const el = document.getElementById('status');
@@ -414,13 +431,17 @@ export class AudioEngine {
       this.pitchNode.disconnect();
       this.pitchNode = null;
     }
-    if (this.keyNode) {
-      this.keyNode.disconnect();
-      this.keyNode = null;
+    if (this.bpmAnalyzer) {
+      this.bpmAnalyzer.destroy();
+      this.bpmAnalyzer = null;
     }
-    if (this.bpmNode) {
-      this.bpmNode.disconnect();
-      this.bpmNode = null;
+    if (this.keyAnalyzer) {
+      this.keyAnalyzer.destroy();
+      this.keyAnalyzer = null;
+    }
+    if (this.captureNode) {
+      this.captureNode.disconnect();
+      this.captureNode = null;
     }
     if (this.sourceNode) {
       this.sourceNode.disconnect();
@@ -436,7 +457,6 @@ export class AudioEngine {
       this.ctx = null;
     }
 
-    this.bpmHistory = [];
     console.log('[AE] Audio engine destroyed (prepared state reset)');
     this.updateStatus('inactive', 'Audio processing stopped');
   }

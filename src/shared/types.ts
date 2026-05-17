@@ -15,9 +15,10 @@ export const DEFAULT_AUDIO_PARAMS: AudioParams = {
 /* ===== Audio Metrics ===== */
 
 export interface AudioMetrics {
-  bpm: number | null; // 60–200 BPM
+  bpm: number | null; // 60–200 BPM (from Aubio.js Tempo)
   key: string | null; // Camelot notation e.g. "8B" / "5A"
-  confidence: number | null; // 0–1 confidence of key detection
+  confidence: number | null; // 0–1 confidence of key detection / tempo confidence
+  frequency: number | null; // Hz (from Aubio.js Pitch, e.g. 440.0 for A4)
   isCapturing: boolean;
 }
 
@@ -25,6 +26,7 @@ export const DEFAULT_AUDIO_METRICS: AudioMetrics = {
   bpm: null,
   key: null,
   confidence: null,
+  frequency: null,
   isCapturing: false,
 };
 

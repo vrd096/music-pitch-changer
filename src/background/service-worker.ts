@@ -95,7 +95,7 @@ async function startCapture(tabId: number): Promise<void> {
       isCapturing: true,
       tabId,
       params: DEFAULT_AUDIO_PARAMS,
-      metrics: { bpm: null, key: null, confidence: null, isCapturing: true },
+      metrics: { bpm: null, key: null, confidence: null, frequency: null, isCapturing: true },
     };
     await saveStateToStorage(state);
     startKeepAlive();
@@ -120,7 +120,7 @@ async function stopCapture(): Promise<void> {
       ...state,
       isCapturing: false,
       tabId: null,
-      metrics: { bpm: null, key: null, confidence: null, isCapturing: false },
+      metrics: { bpm: null, key: null, confidence: null, frequency: null, isCapturing: false },
     };
     await saveStateToStorage(state);
     stopKeepAlive();

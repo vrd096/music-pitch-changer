@@ -29,6 +29,7 @@ export function useExtensionState(): UseExtensionStateReturn {
               bpm: metrics.bpm ?? prev.metrics.bpm,
               key: metrics.key ?? prev.metrics.key,
               confidence: metrics.confidence ?? prev.metrics.confidence,
+              frequency: metrics.frequency ?? prev.metrics.frequency,
               isCapturing: metrics.isCapturing ?? prev.isCapturing,
             },
           }));

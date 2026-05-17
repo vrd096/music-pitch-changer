@@ -56,17 +56,18 @@ Popup (React UI) ↔ Service Worker (координация) ↔ Offscreen Docum
 
 ```bash
 # Клонирование
-git clone https://github.com/your-username/music-pitch-changer.git
+git clone https://github.com/vrd096/music-pitch-changer.git
 cd music-pitch-changer
 
 # Установка зависимостей
 npm install
 
-# Сборка worklet'ов (AudioWorklet IIFE)
-npm run build:worklets
+# Полная сборка (расширение + worklet'ы)
+npm run build:all
 
-# Сборка расширения
-npm run build
+# Или по отдельности:
+npm run build:worklets   # сборка AudioWorklet'ов (IIFE)
+npm run build            # сборка расширения
 
 # Запуск тестов
 npm test
@@ -77,10 +78,12 @@ npm run lint
 
 ### Загрузка в Chrome
 
-1. Открой `chrome://extensions/`
-2. Включи "Режим разработчика"
-3. Нажми "Загрузить распакованное расширение"
-4. Выбери папку [`dist/`](dist/)
+1. Открой [`chrome://extensions/`](chrome://extensions/)
+2. Включи **"Режим разработчика"** (правый верхний угол)
+3. Нажми **"Загрузить распакованное расширение"**
+4. Выбери папку [`dist/`](dist/) в корне проекта
+
+После загрузки расширение появится в панели инструментов Chrome. Открой любую вкладку с аудио (YouTube, Beatport и т.д.) и нажми **Start**.
 
 ## Разработка
 
@@ -104,11 +107,14 @@ npm run test:watch
 
 ```
 src/
+├── popup.html                 # Popup HTML (точка входа)
+├── offscreen.html             # Offscreen HTML (точка входа)
+├── manifest.json              # Манифест расширения
+├── audio-worklet.d.ts         # Типы для AudioWorklet
 ├── background/
 │   └── service-worker.ts      # Service Worker
 ├── offscreen/
 │   ├── audio-engine.ts        # Аудио-движок
-│   ├── offscreen.html         # Offscreen документ
 │   └── offscreen.ts           # Точка входа Offscreen
 ├── popup/
 │   ├── components/
@@ -122,7 +128,6 @@ src/
 │   │   └── useExtensionState.ts
 │   ├── App.tsx
 │   ├── index.css
-│   ├── index.html
 │   └── index.tsx
 ├── shared/
 │   ├── messaging.ts           # Фабрика сообщений
@@ -131,8 +136,27 @@ src/
 │   ├── bpm-processor.ts       # BPM AudioWorklet
 │   ├── key-processor.ts       # Key AudioWorklet
 │   └── pitch-processor.ts     # Pitch AudioWorklet
-├── audio-worklet.d.ts         # Типы для AudioWorklet
-└── manifest.json              # Манифест расширения
+
+dist/                          # Сборка (загружается в Chrome)
+├── manifest.json
+├── popup.html
+├── offscreen.html
+├── background/
+│   └── service-worker.js
+├── offscreen/
+│   └── offscreen.js
+├── assets/
+│   ├── popup-*.css
+│   ├── popup-*.js
+│   └── ...
+├── worklets/                  # AudioWorklet IIFE файлы
+│   ├── pitch-processor.js
+│   ├── bpm-processor.js
+│   └── key-processor.js
+└── icons/
+    ├── icon16.png
+    ├── icon48.png
+    └── icon128.png
 ```
 
 ## Лицензия

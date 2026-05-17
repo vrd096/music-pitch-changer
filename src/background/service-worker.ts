@@ -47,7 +47,7 @@ async function ensureOffscreenDocument(): Promise<void> {
   if (existingDocs) return;
 
   await chrome.offscreen.createDocument({
-    url: 'offscreen/offscreen.html',
+    url: 'offscreen.html',
     reasons: [chrome.offscreen.Reason.AUDIO_PLAYBACK as string] as chrome.offscreen.Reason[],
     justification:
       'Audio processing (pitch shifting, BPM/Key detection) requires a persistent AudioContext.',

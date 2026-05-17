@@ -18,9 +18,9 @@ export default defineConfig({
     emptyOutDir: true,
     rollupOptions: {
       input: {
-        popup: resolve(__dirname, 'src/popup/index.html'),
+        popup: resolve(__dirname, 'src/popup.html'),
         'service-worker': resolve(__dirname, 'src/background/service-worker.ts'),
-        offscreen: resolve(__dirname, 'src/offscreen/offscreen.html'),
+        offscreen: resolve(__dirname, 'src/offscreen.html'),
       },
       output: {
         entryFileNames: (chunkInfo) => {
@@ -34,12 +34,6 @@ export default defineConfig({
         },
         chunkFileNames: 'assets/[name]-[hash].js',
         assetFileNames: (assetInfo) => {
-          if (assetInfo.name === 'offscreen.html') {
-            return 'offscreen/offscreen.html';
-          }
-          if (assetInfo.name === 'popup.html') {
-            return 'popup.html';
-          }
           if (assetInfo.name?.endsWith('.css')) {
             return 'assets/[name]-[hash].css';
           }

@@ -12,6 +12,7 @@ import { Messages, saveStateToStorage, loadStateFromStorage } from '../shared/me
 
 let state: ExtensionState = { ...DEFAULT_EXTENSION_STATE };
 let offscreenPort: chrome.runtime.Port | null = null;
+let popupPort: chrome.runtime.Port | null = null;
 let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
 let captureTabId: number | null = null;
 
@@ -25,6 +26,8 @@ async function init(): Promise<void> {
 /* ===== Keep-alive mechanism ===== */
 
 function startKeepAlive(): void {
+  // Popup port keeps the SW alive natively — no alarms needed
+  if (popupPort) return;
   if (keepAliveInterval) return;
   chrome.alarms.create('keep-alive', { periodInMinutes: 0.5 });
   keepAliveInterval = setInterval(() => {
@@ -264,6 +267,27 @@ chrome.runtime.onConnect.addListener((port) => {
     port.onDisconnect.addListener(() => {
       console.log('[SW] Offscreen port disconnected');
       offscreenPort = null;
+    });
+  }
+
+  if (port.name === 'popup') {
+    popupPort = port;
+    console.log('[SW] Popup port connected — SW will stay alive');
+
+    // Popup port keeps SW alive, no need for alarms
+    if (keepAliveInterval) {
+      stopKeepAlive();
+    }
+
+    port.onDisconnect.addListener(() => {
+      console.log('[SW] Popup port disconnected');
+      popupPort = null;
+
+      // Restart alarm-based keep-alive if capture is still running
+      if (state.isCapturing) {
+        console.log('[SW] Capture still active, restarting alarm keep-alive');
+        startKeepAlive();
+      }
     });
   }
 });

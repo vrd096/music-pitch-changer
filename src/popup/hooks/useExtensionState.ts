@@ -15,6 +15,14 @@ export function useExtensionState(): UseExtensionStateReturn {
   const stateRef = useRef(state);
   stateRef.current = state;
 
+  // Establish persistent port connection to keep SW alive while popup is open
+  useEffect(() => {
+    const port = chrome.runtime.connect({ name: 'popup' });
+    return () => {
+      port.disconnect();
+    };
+  }, []);
+
   // Listen for metrics updates and state from background
   useEffect(() => {
     const handleMessage = (message: unknown) => {

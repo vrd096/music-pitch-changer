@@ -377,10 +377,11 @@ export type KeyCallback = (result: KeyResult) => void;
  * analyzer.stop();  // остановить
  * ```
  *
- * Стабилизация:
- * - Хромаграммы накапливаются и усредняются за 3 цикла (~12 сек)
- * - Результаты сглаживаются через history (7 значений)
- * - Lock-in: после high-confidence (>0.6) смена требует 5/7 большинства
+ * Стабилизация (lock-in, как в BpmAnalyzer):
+ * - Скользящее окно хромаграмм (5 шт × 2с = ~10с)
+ * - Усреднение хромаграммы по окну перед корреляцией с профилями
+ * - Фаза 1 (Collecting): накопление, callback не вызывается
+ * - Фаза 2 (Locked): после первого определения — навсегда, без обновлений
  */
 export class KeyAnalyzer {
   private detector: KeyDetector;
@@ -393,8 +394,8 @@ export class KeyAnalyzer {
   /** Размер окна анализа (1 секунда) */
   private readonly ANALYSIS_WINDOW: number;
 
-  /** Интервал анализа в миллисекундах (~4 секунды) */
-  private readonly ANALYSIS_INTERVAL_MS = 4000;
+  /** Интервал анализа в миллисекундах (~2 секунды) */
+  private readonly ANALYSIS_INTERVAL_MS = 2000;
 
   /** ID таймера */
   private timerId: ReturnType<typeof setTimeout> | null = null;
@@ -402,19 +403,19 @@ export class KeyAnalyzer {
   /** Callback для результатов */
   private callback: KeyCallback | null = null;
 
-  /** Сглаживание результатов */
-  private readonly KEY_HISTORY_SIZE = 7;
-  private keyHistory: string[] = [];
-  private lastReportedKey: string | null = null;
-  private lastReportedConfidence = 0;
+  /**
+   * Скользящее окно хромаграмм для усреднения.
+   * 5 хромаграмм × 2с интервал = ~10s окно сглаживания.
+   */
+  private readonly CHROMAGRAM_WINDOW_SIZE = 5;
+  private chromagramWindow: Float32Array[] = [];
 
   /**
-   * Накопление хромаграмм: вместо анализа одного окна усредняем
-   * несколько последовательных хромаграмм для устойчивости.
+   * Lock-in состояние (как в BpmAnalyzer).
+   * null = Фаза 1 (Collecting), callback не вызывается.
+   * non-null = Фаза 2 (Locked), навсегда заблокировано.
    */
-  private accumulatedChroma: Float32Array;
-  private chromaCount = 0;
-  private readonly ACCUMULATE_CYCLES = 2;
+  private displayedKey: string | null = null;
 
   constructor(sampleRate: number) {
     // 1 секунда аудио для анализа
@@ -422,8 +423,6 @@ export class KeyAnalyzer {
     // Кольцевой буфер ~2 секунды
     this.buffer = new Float32Array(sampleRate * 2);
     this.detector = new KeyDetector(2048, sampleRate);
-    // Накопленная хромаграмма
-    this.accumulatedChroma = new Float32Array(12);
   }
 
   /** Установить callback для получения результатов */
@@ -465,15 +464,15 @@ export class KeyAnalyzer {
     this.buffer.fill(0);
     this.writeOffset = 0;
     this.totalSamples = 0;
-    this.keyHistory = [];
-    this.lastReportedKey = null;
-    this.lastReportedConfidence = 0;
-    this.accumulatedChroma.fill(0);
-    this.chromaCount = 0;
+    this.displayedKey = null;
+    this.chromagramWindow = [];
   }
 
   /** Принудительный запуск анализа (без ожидания таймера) */
   analyzeNow(): void {
+    // Фаза 2 (Locked) — навсегда заблокировано, ни одного обновления
+    if (this.displayedKey !== null) return;
+
     if (this.totalSamples < this.ANALYSIS_WINDOW) return;
 
     // Извлечь последние ANALYSIS_WINDOW сэмплов из кольцевого буфера
@@ -485,20 +484,26 @@ export class KeyAnalyzer {
       windowData[i] = this.buffer[(startOffset + i) % bufLen];
     }
 
-    // Вычислить хромаграмму и накопить
+    // Вычислить хромаграмму
     const chroma = this.detector['chromagram'].compute(windowData);
-    for (let i = 0; i < 12; i++) {
-      this.accumulatedChroma[i] += chroma[i];
+
+    // Добавить в скользящее окно
+    this.chromagramWindow.push(chroma);
+    if (this.chromagramWindow.length > this.CHROMAGRAM_WINDOW_SIZE) {
+      this.chromagramWindow.shift();
     }
-    this.chromaCount++;
 
-    // Детектируем ключ только после накопления ACCUMULATE_CYCLES хромаграмм
-    if (this.chromaCount < this.ACCUMULATE_CYCLES) return;
+    // Ждём заполнения окна перед первым определением
+    if (this.chromagramWindow.length < this.CHROMAGRAM_WINDOW_SIZE) return;
 
-    // Усреднённая хромаграмма
-    const avgChroma = new Float32Array(12);
+    // Усреднённая хромаграмма по всему окну
+    const meanChroma = new Float32Array(12);
     for (let i = 0; i < 12; i++) {
-      avgChroma[i] = this.accumulatedChroma[i] / this.chromaCount;
+      let sum = 0;
+      for (let j = 0; j < this.chromagramWindow.length; j++) {
+        sum += this.chromagramWindow[j][i];
+      }
+      meanChroma[i] = sum / this.chromagramWindow.length;
     }
 
     // Корреляция усреднённой хромаграммы с профилями
@@ -507,7 +512,7 @@ export class KeyAnalyzer {
     let bestType: 'major' | 'minor' = 'major';
 
     for (const [key, profile] of Object.entries(MAJOR_PROFILES)) {
-      const corr = correlate(avgChroma, profile);
+      const corr = correlate(meanChroma, profile);
       if (corr > bestCorr) {
         bestCorr = corr;
         bestKey = key;
@@ -515,7 +520,7 @@ export class KeyAnalyzer {
       }
     }
     for (const [key, profile] of Object.entries(MINOR_PROFILES)) {
-      const corr = correlate(avgChroma, profile);
+      const corr = correlate(meanChroma, profile);
       if (corr > bestCorr) {
         bestCorr = corr;
         bestKey = key;
@@ -523,49 +528,15 @@ export class KeyAnalyzer {
       }
     }
 
-    // Сброс накопления для следующего цикла
-    this.accumulatedChroma.fill(0);
-    this.chromaCount = 0;
-
     if (!bestKey || bestCorr < 0.1) return;
 
     const camelot = bestType === 'major' ? CAMELOT_MAJOR[bestKey] : CAMELOT_MINOR[bestKey];
     const keyStr = bestType === 'major' ? `${bestKey} (${camelot})` : `${bestKey}m (${camelot})`;
     const confidence = Math.min(bestCorr / 10, 1);
 
-    // Сглаживание через history
-    this.keyHistory.push(keyStr);
-    if (this.keyHistory.length > this.KEY_HISTORY_SIZE) {
-      this.keyHistory.shift();
-    }
-
-    // Lock-in: после high-confidence смена требует сильного большинства.
-    // Порог вычисляется от ТЕКУЩЕЙ длины истории, а не от KEY_HISTORY_SIZE,
-    // чтобы первое срабатывание происходило при накоплении 3+ результатов.
-    const majorityThreshold =
-      this.lastReportedKey !== null && this.lastReportedConfidence > 0.6
-        ? Math.ceil(this.keyHistory.length * 0.6)
-        : Math.ceil(this.keyHistory.length * 0.5);
-
-    if (this.keyHistory.length >= 3) {
-      const freq: Record<string, number> = {};
-      for (const k of this.keyHistory) {
-        freq[k] = (freq[k] ?? 0) + 1;
-      }
-      const sorted = Object.entries(freq).sort((a, b) => b[1] - a[1]);
-      const best = sorted[0];
-      if (best && best[1] >= majorityThreshold) {
-        const stableKey = best[0];
-        if (stableKey !== this.lastReportedKey) {
-          this.lastReportedKey = stableKey;
-          this.lastReportedConfidence = confidence;
-          this.callback?.({
-            key: stableKey,
-            confidence,
-          });
-        }
-      }
-    }
+    // Фаза 1 → Фаза 2: lock-in после первого стабильного определения
+    this.displayedKey = keyStr;
+    this.callback?.({ key: keyStr, confidence });
   }
 
   /** Освободить ресурсы */
@@ -573,11 +544,8 @@ export class KeyAnalyzer {
     this.stop();
     this.detector.destroy();
     this.callback = null;
-    this.keyHistory = [];
-    this.lastReportedKey = null;
-    this.lastReportedConfidence = 0;
-    this.accumulatedChroma = null!;
-    this.chromaCount = 0;
+    this.chromagramWindow = [];
+    this.displayedKey = null;
   }
 
   /* ===== Private ===== */

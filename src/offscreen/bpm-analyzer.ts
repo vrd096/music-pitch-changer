@@ -15,14 +15,27 @@ export type BpmCallback = (result: BpmResult) => void;
  * накапливает до bufferSize (4096), затем вызывает
  * RealTimeBpmAnalyzer.analyzeChunk() для peak detection + BPM вычисления.
  *
- * Стабилизация BPM (DJ-software подход):
- *   1. Защита от половинного/двойного BPM — ratio < 0.75 || > 1.5 → игнор
- *   2. Sliding window history (5 значений)
- *   3. Median-фильтр для устойчивости к выбросам
- *   4. Dead zone: не репортим изменения < 1 BPM
- *   5. Округление до десятых
+ * Стабилизация BPM: скользящее окно + жёсткий lock после стабилизации.
  *
- * Аналогично KeyAnalyzer — не блокирует audio thread.
+ *   Фаза 1 — Collecting (без callback):
+ *     Накапливаем значения в скользящем окне (макс. 50).
+ *     Фильтруем по MIN_WEIGHT (count >= 2) — ранние ненадёжные пики отбрасываются.
+ *     Ничего не показываем, пока не выполнены ОБА условия:
+ *       a) В окне >= MIN_VALUES_FOR_SHOW (35) значений
+ *       b) stddev окна < MAX_STDDEV (1.5) — значения плотно кластеризованы
+ *
+ *   Фаза 2 — Locked (один callback, навсегда):
+ *     Вычисляем медиану стабильного окна, вызываем callback один раз.
+ *     После этого handleResult() игнорирует все новые значения.
+ *     Пользователь видит одно значение без скачков до конца сессии.
+ *
+ *   При сбросе (reset/Stop): все состояния очищаются, начинаем заново.
+ *   При analyzerReset библиотеки: окно НЕ очищается (если locked — всё равно).
+ *
+ *   Такой подход гарантирует:
+ *   - Никаких видимых скачков BPM (показываем только когда уверены)
+ *   - Точный BPM (медиана большого стабильного кластера)
+ *   - Не блокируется на неправильном значении (ждём реальной стабилизации)
  */
 export class BpmAnalyzer {
   private analyzer: RealTimeBpmAnalyzer;
@@ -40,22 +53,43 @@ export class BpmAnalyzer {
   /** Callback для результатов */
   private callback: BpmCallback | null = null;
 
-  /** Сглаживание через историю BPM */
-  private readonly BPM_HISTORY_SIZE = 7;
-  private bpmHistory: number[] = [];
-  private confidenceHistory: number[] = [];
+  /* ===== Sliding Window + Lock ===== */
 
-  /** Последнее отправленное значение (для dead zone) */
-  private lastReportedBpm: number | null = null;
+  /** Максимальный размер скользящего окна значений BPM.
+   *  50 значений × ~93ms = ~4.7 секунды — большой буфер для точной медианы. */
+  private readonly WINDOW_SIZE = 50;
+
+  /** Минимальное количество значений в окне перед первым показом.
+   *  35 значений × ~93ms = ~3.3 секунды.
+   *  Этого достаточно, чтобы библиотека накопила достаточно пиков. */
+  private readonly MIN_VALUES_FOR_SHOW = 35;
+
+  /** Порог stddev для признания значений "стабильными".
+   *  1.5 BPM — очень плотный кластер. Если stddev >= 1.5, значит значения
+   *  всё ещё разбросаны (напр. смесь 131 и 134 даёт stddev ~1.5).
+   *  Ждём, пока кластер сузится к истинному BPM. */
+  private readonly MAX_STDDEV = 1.5;
+
+  /** Минимальный вес (count) для принятия значения от библиотеки.
+   *  count — количество peak-интервалов, сошедшихся на этом BPM.
+   *  count >= 2: достаточно пиков для осмысленного результата.
+   *  Ранние результаты с count = 1 отбрасываются как ненадёжные. */
+  private readonly MIN_WEIGHT = 2;
+
+  /** Скользящее окно сырых значений BPM (прошедших фильтр MIN_WEIGHT) */
+  private valueWindow: number[] = [];
+
+  /** Текущее отображаемое значение BPM.
+   *  null = фаза 1 (Collecting), не null = фаза 2 (Locked). */
+  private displayedBpm: number | null = null;
 
   constructor(sampleRate: number) {
     this.sampleRate = sampleRate;
     this.buffer = new Float32Array(this.BUFFER_SIZE);
 
     // stabilizationTime: 60000ms — анализатор не сбрасывается 60 секунд,
-    //   чтобы BPM успел стабилизироваться. После сброса всё равно заполняем
-    //   историю последним известным значением (onAnalyzerReset).
-    // muteTimeInIndexes: 5000 — пауза между поиском пиков, чтобы не находить один и тот же
+    //   чтобы BPM успел стабилизироваться.
+    // muteTimeInIndexes: 5000 — пауза между поиском пиков
     // continuousAnalysis: true — автосброс после stabilizationTime
     this.analyzer = new RealTimeBpmAnalyzer({
       continuousAnalysis: true,
@@ -110,9 +144,8 @@ export class BpmAnalyzer {
     this.analyzer.reset();
     this.buffer.fill(0);
     this.bufferOffset = 0;
-    this.bpmHistory = [];
-    this.confidenceHistory = [];
-    this.lastReportedBpm = null;
+    this.displayedBpm = null;
+    this.valueWindow = [];
     this.analysisChain = Promise.resolve();
   }
 
@@ -145,38 +178,38 @@ export class BpmAnalyzer {
 
   /**
    * Вызывается при analyzerReset от RealTimeBpmAnalyzer (каждые stabilizationTime).
-   * Заполняет историю последним известным BPM, чтобы после сброса анализатора
-   * BPM не начинал скакать, а сразу показывал стабильное значение.
+   *
+   * Если BPM уже заблокирован (displayedBpm !== null) — reset не влияет
+   * на отображение, handleResult всё равно игнорирует новые значения.
+   * Если ещё в фазе Collecting — окно не очищаем, старые значения валидны.
    */
   private onAnalyzerReset(): void {
-    if (this.lastReportedBpm !== null) {
-      // Заполняем историю последним известным значением,
-      // чтобы median сразу был стабильным
-      this.bpmHistory = Array(this.BPM_HISTORY_SIZE).fill(this.lastReportedBpm);
-      // Вес — средний от предыдущей истории (если есть)
-      if (this.confidenceHistory.length > 0) {
-        const avg =
-          this.confidenceHistory.reduce((s, v) => s + v, 0) / this.confidenceHistory.length;
-        this.confidenceHistory = Array(this.BPM_HISTORY_SIZE).fill(avg);
-      }
-    }
-    console.log(
-      '[BpmAnalyzer] analyzer reset, history refilled with last bpm:',
-      this.lastReportedBpm,
-    );
+    console.log('[BpmAnalyzer] analyzer reset (internal peaks cleared)');
   }
 
   /**
    * Обработка результата от RealTimeBpmAnalyzer.
    *
-   * Применяет DJ-software стабилизацию:
-   * 1. Защита от половинного/двойного BPM (ratio 0.75–1.5)
-   * 2. Sliding window history → median
-   * 3. Dead zone (< 1 BPM)
-   * 4. Округление до десятых
+   * Две фазы: Collecting (накопление) → Locked (заморожено).
+   *
+   * Collecting:
+   *   - Фильтруем по rawBpm (30–300) и MIN_WEIGHT (count >= 2)
+   *   - Добавляем в скользящее окно (макс WINDOW_SIZE)
+   *   - Ждём MIN_VALUES_FOR_SHOW и stddev < MAX_STDDEV
+   *   - Пользователь видит "Detecting"
+   *
+   * Locked:
+   *   - После стабилизации: вычисляем медиану, вызываем callback ОДИН раз
+   *   - Все последующие handleResult игнорируются (displayedBpm !== null)
+   *   - Только reset() может снять блокировку
    */
   private handleResult(candidates: BpmCandidates): void {
     if (!candidates.bpm || candidates.bpm.length === 0) return;
+
+    // ================================================================
+    //  ФАЗА 2 — LOCKED: BPM уже показан, игнорируем все новые значения
+    // ================================================================
+    if (this.displayedBpm !== null) return;
 
     const best = candidates.bpm[0];
     const rawBpm = best.tempo;
@@ -188,53 +221,50 @@ export class BpmAnalyzer {
     // Отбрасываем явно нереалистичные BPM (< 30 или > 300)
     if (rawBpm < 30 || rawBpm > 300) return;
 
-    // Требуем хотя бы count > 0 (чтобы был хоть один интервал)
-    if (weight < 1) return;
+    // Отбрасываем значения с низким весом — недостаточно пиков для точного BPM
+    if (weight < this.MIN_WEIGHT) return;
 
-    // === Защита от половинного/двойного BPM (DJ-software подход) ===
-    // Если уже есть стабильное значение, проверяем ratio.
-    // Например, stable=128, raw=64 (ratio=0.5) или raw=256 (ratio=2.0) → игнор.
-    if (this.lastReportedBpm !== null) {
-      const ratio = rawBpm / this.lastReportedBpm;
-      if (ratio < 0.75 || ratio > 1.5) {
-        console.log(
-          `[BpmAnalyzer] ignored halving/doubling: raw=${rawBpm} stable=${this.lastReportedBpm} ratio=${ratio.toFixed(2)}`,
-        );
-        return;
-      }
+    // ================================================================
+    //  ФАЗА 1 — COLLECTING: накапливаем, ничего не показываем
+    // ================================================================
+
+    // Добавляем в скользящее окно
+    this.valueWindow.push(rawBpm);
+    if (this.valueWindow.length > this.WINDOW_SIZE) {
+      this.valueWindow.shift();
     }
 
-    console.log(
-      `[BpmAnalyzer] raw bpm=${rawBpm} count=${weight} threshold=${candidates.threshold}`,
-    );
+    // Недостаточно данных для стабильного вывода
+    if (this.valueWindow.length < this.MIN_VALUES_FOR_SHOW) return;
 
-    // Sliding window history (5 значений)
-    this.bpmHistory.push(rawBpm);
-    this.confidenceHistory.push(weight);
-    if (this.bpmHistory.length > this.BPM_HISTORY_SIZE) {
-      this.bpmHistory.shift();
-      this.confidenceHistory.shift();
-    }
+    // Вычисляем медиану и stddev скользящего окна
+    const sorted = [...this.valueWindow].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    const mean = sorted.reduce((s, v) => s + v, 0) / sorted.length;
+    const variance = sorted.reduce((s, v) => s + (v - mean) ** 2, 0) / sorted.length;
+    const stddev = Math.sqrt(variance);
 
-    // Median-фильтр для устойчивости к выбросам
-    const sorted = [...this.bpmHistory].sort((a, b) => a - b);
-    const medianBpm = sorted[Math.floor(sorted.length / 2)];
-    const avgWeight =
-      this.confidenceHistory.reduce((s, v) => s + v, 0) / this.confidenceHistory.length;
-
-    // Dead zone: не репортим, если изменение меньше 2 BPM
-    // (увеличено с 1 для дополнительной стабильности)
-    if (this.lastReportedBpm !== null && Math.abs(medianBpm - this.lastReportedBpm) < 2) {
+    // Если stddev >= MAX_STDDEV — значения ещё разбросаны
+    // (напр. смесь 131 и 134 даёт stddev ~1.5), продолжаем копить
+    if (stddev >= this.MAX_STDDEV) {
+      console.log(
+        `[BpmAnalyzer] window=${this.valueWindow.length} median=${Math.round(median * 10) / 10}` +
+          ` stddev=${stddev.toFixed(2)} (unstable, waiting...)`,
+      );
       return;
     }
 
-    // Репорт — confidence на основе среднего веса (нормализованный к [0,1])
-    // BPM округляем до десятых (DJ-стиль: 128.0, 140.2, etc.)
-    const confidence = Math.min(avgWeight / 50, 1);
-    this.lastReportedBpm = medianBpm;
+    // Стабильно! Вычисляем финальный BPM и блокируем навсегда
+    this.displayedBpm = Math.round(median * 10) / 10;
+
+    console.log(
+      `[BpmAnalyzer] ✅ LOCKED at ${this.displayedBpm} BPM` +
+        ` (window=${this.valueWindow.length}, stddev=${stddev.toFixed(2)})`,
+    );
+
     this.callback?.({
-      bpm: Math.round(medianBpm * 10) / 10,
-      confidence,
+      bpm: this.displayedBpm,
+      confidence: 1,
     });
   }
 }

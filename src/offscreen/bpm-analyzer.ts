@@ -70,13 +70,7 @@ export class BpmAnalyzer {
    *  Ждём, пока кластер сузится к истинному BPM. */
   private readonly MAX_STDDEV = 1.5;
 
-  /** Минимальный вес (count) для принятия значения от библиотеки.
-   *  count — количество peak-интервалов, сошедшихся на этом BPM.
-   *  count >= 2: достаточно пиков для осмысленного результата.
-   *  Ранние результаты с count = 1 отбрасываются как ненадёжные. */
-  private readonly MIN_WEIGHT = 2;
-
-  /** Скользящее окно сырых значений BPM (прошедших фильтр MIN_WEIGHT) */
+  /** Скользящее окно сырых значений BPM */
   private valueWindow: number[] = [];
 
   /** Текущее отображаемое значение BPM.
@@ -188,12 +182,79 @@ export class BpmAnalyzer {
   }
 
   /**
+   * Выбирает наилучший BPM из списка кандидатов с учётом гармоник.
+   *
+   * Библиотека сортирует candidates.bpm по count (количество peak-интервалов,
+   * сошедшихся на этом BPM). Однако на некоторых треках триольное деление
+   * (BPM * 2/3) даёт БОЛЬШЕ интервалов, чем основной темп. Например, для
+   * трека 140 BPM: bpm[0] = 93 (count=5, триоль), bpm[1] = 140 (count=3, основной).
+   *
+   * Логика выбора:
+   *   1. Берём кандидатов с count >= 1 и BPM в диапазоне 30–300
+   *   2. Сортируем по count (desc) — это уже сделано библиотекой
+   *   3. Проверяем гармонические связи между top-кандидатами:
+   *      - Если ratio ≈ 1.5 (bpm[1] / bpm[0]): bpm[1] — основной темп,
+   *        bpm[0] — триоль. Предпочитаем bpm[1] если его count >= 50% от bpm[0].
+   *      - Если ratio ≈ 0.667 (bpm[1] / bpm[0]): bpm[0] — основной темп,
+   *        bpm[1] — триоль. Оставляем bpm[0].
+   *      - Если ratio ≈ 2.0 (bpm[1] / bpm[0]): bpm[1] — удвоение (октава).
+   *        Предпочитаем bpm[0] (нижний темп ближе к реальному).
+   *   4. Возвращаем выбранный BPM или null если ни один не подошёл.
+   */
+  private pickBestBpm(candidates: BpmCandidates): number | null {
+    if (!candidates.bpm || candidates.bpm.length === 0) return null;
+
+    const valid = candidates.bpm.filter(
+      (c) => c.tempo >= 30 && c.tempo <= 300 && (c.count ?? 0) >= 1,
+    );
+
+    if (valid.length === 0) return null;
+
+    // valid[0] — с наивысшим count (библиотека уже отсортировала)
+    const top = valid[0];
+    const topCount = top.count ?? 0;
+
+    // Ищем гармоники среди остальных кандидатов
+    for (let i = 1; i < valid.length; i++) {
+      const cand = valid[i];
+      const candCount = cand.count ?? 0;
+
+      // Не рассматриваем кандидатов с существенно меньшим count
+      if (candCount < topCount * 0.5) break;
+
+      const ratio = cand.tempo / top.tempo;
+
+      // ratio ≈ 1.5: кандидат — основной темп, top — триоль
+      // Пример: top=93, cand=140 → ratio=1.505 → берём 140
+      if (ratio > 1.45 && ratio < 1.56) {
+        console.log(
+          `[BpmAnalyzer] 🎯 harmonic 1.5x: cand=${cand.tempo} (count=${candCount}) > top=${top.tempo} (count=${topCount})`,
+        );
+        return cand.tempo;
+      }
+
+      // ratio ≈ 2.0: кандидат — удвоение (октава)
+      // Пример: top=70, cand=140 → ratio=2.0 → берём 70 (нижний темп)
+      if (ratio > 1.9 && ratio < 2.1) {
+        console.log(
+          `[BpmAnalyzer] 🎯 harmonic 2x: keeping top=${top.tempo} (count=${topCount}) > cand=${cand.tempo} (count=${candCount})`,
+        );
+        // Оставляем top (нижний темп)
+        return top.tempo;
+      }
+    }
+
+    // Ничего не нашли — возвращаем top как есть
+    return top.tempo;
+  }
+
+  /**
    * Обработка результата от RealTimeBpmAnalyzer.
    *
    * Две фазы: Collecting (накопление) → Locked (заморожено).
    *
    * Collecting:
-   *   - Фильтруем по rawBpm (30–300) и MIN_WEIGHT (count >= 2)
+   *   - Выбираем лучший BPM через pickBestBpm (гармонический анализ)
    *   - Добавляем в скользящее окно (макс WINDOW_SIZE)
    *   - Ждём MIN_VALUES_FOR_SHOW и stddev < MAX_STDDEV
    *   - Пользователь видит "Detecting"
@@ -204,25 +265,14 @@ export class BpmAnalyzer {
    *   - Только reset() может снять блокировку
    */
   private handleResult(candidates: BpmCandidates): void {
-    if (!candidates.bpm || candidates.bpm.length === 0) return;
-
     // ================================================================
     //  ФАЗА 2 — LOCKED: BPM уже показан, игнорируем все новые значения
     // ================================================================
     if (this.displayedBpm !== null) return;
 
-    const best = candidates.bpm[0];
-    const rawBpm = best.tempo;
-
-    // confidence из библиотеки ВСЕГДА 0 (см. groupByTempo: confidence: 0).
-    // Используем count (количество интервалов, сошедшихся на этом BPM) как вес.
-    const weight = best.count ?? 0;
-
-    // Отбрасываем явно нереалистичные BPM (< 30 или > 300)
-    if (rawBpm < 30 || rawBpm > 300) return;
-
-    // Отбрасываем значения с низким весом — недостаточно пиков для точного BPM
-    if (weight < this.MIN_WEIGHT) return;
+    // Выбираем лучший BPM с учётом гармоник
+    const rawBpm = this.pickBestBpm(candidates);
+    if (rawBpm === null) return;
 
     // ================================================================
     //  ФАЗА 1 — COLLECTING: накапливаем, ничего не показываем

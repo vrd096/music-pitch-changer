@@ -50,6 +50,37 @@ export class AudioEngine {
   private prepared = false;
   private preparePromise: Promise<void> | null = null;
 
+  /* ===== Silence Detection (смена трека) ===== */
+
+  /**
+   * Порог RMS для определения "цифровой тишины" между треками.
+   *
+   * Стратегия: ultra-low threshold + короткое окно.
+   * Тихие пассажи музыки (piano, паузы между фразами) имеют RMS ~0.01–0.05.
+   * Реальная цифровая тишина между треками — RMS < 0.0005.
+   *
+   * При переключении трека в браузере/плеере между треками есть
+   * короткая пауза (100–300ms) с практически нулевым сигналом.
+   * Этого достаточно, чтобы счётчик достиг порога.
+   */
+  private static readonly SILENCE_THRESHOLD = 0.0005;
+  /**
+   * Сколько последовательных чанков (по 512 сэмплов) должны быть
+   * **полной тишиной** (< 0.0005 RMS), чтобы считать, что трек сменился.
+   *
+   * ~150ms при 44100 Гц: 44100 * 0.15 / 512 ≈ 13 чанков
+   *
+   * Между треками в цифровом плеере обычно есть хотя бы 100–300ms
+   * полной тишины. 150ms — достаточно, чтобы не реагировать на
+   * паузы между фразами (где RMS ~0.01, выше порога).
+   */
+  private static readonly SILENCE_CHUNKS_REQUIRED = 13;
+
+  /** Счётчик последовательных тихих чанков */
+  private silentChunkCount = 0;
+  /** Флаг: true = тишина уже обнаружена (анализаторы сброшены) */
+  private wasSilent = false;
+
   constructor() {
     this.setupPort();
   }
@@ -134,6 +165,10 @@ export class AudioEngine {
     if (this.isRunning) {
       await this.destroy();
     }
+
+    // Сброс счётчиков тишины при старте захвата
+    this.silentChunkCount = 0;
+    this.wasSilent = false;
 
     try {
       // Ensure AudioContext + worklets are prepared.
@@ -289,6 +324,9 @@ export class AudioEngine {
       // Получаем аудио-чанки от capture-processor и передаём в оба анализатора
       this.captureNode.port.onmessage = (event: MessageEvent) => {
         if (event.data?.type === 'audio' && event.data.samples instanceof Float32Array) {
+          // Детекция тишины для сброса BPM/KEY при смене трека
+          this.detectSilence(event.data.samples);
+
           this.keyAnalyzer?.addChunk(event.data.samples);
           this.bpmAnalyzer?.addChunk(event.data.samples);
         }
@@ -378,6 +416,52 @@ export class AudioEngine {
     });
   }
 
+  /* ===== Silence Detection (смена трека) ===== */
+
+  /**
+   * Анализирует RMS аудио-чанка для детекции тишины.
+   * Если N последовательных чанков тихие → сбрасывает BPM/KEY анализаторы
+   * и отправляет null метрики в UI.
+   */
+  private detectSilence(samples: Float32Array): void {
+    // Вычисляем RMS (root mean square) — средняя громкость
+    let sumSq = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const s = samples[i];
+      sumSq += s * s;
+    }
+    const rms = Math.sqrt(sumSq / samples.length);
+
+    if (rms < AudioEngine.SILENCE_THRESHOLD) {
+      this.silentChunkCount++;
+    } else {
+      // Есть звук — сбрасываем счётчик тишины
+      this.silentChunkCount = 0;
+      this.wasSilent = false;
+    }
+
+    // Если тишина держится достаточно долго — сбрасываем анализаторы
+    if (!this.wasSilent && this.silentChunkCount >= AudioEngine.SILENCE_CHUNKS_REQUIRED) {
+      this.wasSilent = true;
+      this.resetAnalyzers();
+    }
+  }
+
+  /** Сброс BPM/KEY анализаторов при смене трека */
+  private resetAnalyzers(): void {
+    console.log('[AE] Silence detected — resetting analyzers (track changed)');
+
+    this.bpmAnalyzer?.reset();
+    this.keyAnalyzer?.reset();
+
+    // Отправляем null метрики — UI покажет "Detecting..." заново
+    this.reportMetrics({
+      bpm: null,
+      key: null,
+      confidence: null,
+    });
+  }
+
   /* ===== Metrics Reporting ===== */
 
   private reportMetrics(metrics: Partial<AudioMetrics>): void {
@@ -388,13 +472,15 @@ export class AudioEngine {
       ...metrics,
       isCapturing: metrics.isCapturing ?? this.isRunning,
     };
+    // Используем lastMetrics (уже смерджен) для отправки — иначе
+    // handleKeyResult → reportMetrics({ key }) затрёт bpm (undefined → null)
     this.postMessage(
       Messages.metricsUpdate({
-        bpm: metrics.bpm ?? null,
-        key: metrics.key ?? null,
-        confidence: metrics.confidence ?? null,
-        frequency: metrics.frequency ?? null,
-        isCapturing: metrics.isCapturing ?? this.isRunning,
+        bpm: this.lastMetrics.bpm ?? null,
+        key: this.lastMetrics.key ?? null,
+        confidence: this.lastMetrics.confidence ?? null,
+        frequency: this.lastMetrics.frequency ?? null,
+        isCapturing: this.lastMetrics.isCapturing ?? this.isRunning,
       }),
     );
   }

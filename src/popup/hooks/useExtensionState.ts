@@ -26,10 +26,12 @@ export function useExtensionState(): UseExtensionStateReturn {
           setState((prev) => ({
             ...prev,
             metrics: {
-              bpm: metrics.bpm ?? prev.metrics.bpm,
-              key: metrics.key ?? prev.metrics.key,
-              confidence: metrics.confidence ?? prev.metrics.confidence,
-              frequency: metrics.frequency ?? prev.metrics.frequency,
+              bpm: metrics.bpm !== undefined ? metrics.bpm : prev.metrics.bpm,
+              key: metrics.key !== undefined ? metrics.key : prev.metrics.key,
+              confidence:
+                metrics.confidence !== undefined ? metrics.confidence : prev.metrics.confidence,
+              frequency:
+                metrics.frequency !== undefined ? metrics.frequency : prev.metrics.frequency,
               isCapturing: metrics.isCapturing ?? prev.isCapturing,
             },
           }));

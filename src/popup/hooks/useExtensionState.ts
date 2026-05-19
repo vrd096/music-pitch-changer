@@ -6,8 +6,26 @@ import { Messages, sendRuntimeMessage } from '../../shared/messaging';
 interface UseExtensionStateReturn {
   state: ExtensionState;
   isCapturing: boolean;
-  updateParams: (partial: Partial<AudioParams>) => Promise<void>;
+  updateParams: (partial: Partial<AudioParams>) => void;
   requestState: () => Promise<void>;
+}
+
+/**
+ * Debounce helper: возвращает функцию, которая вызывает callback
+ * не чаще чем раз в `delay` мс. Последний вызов всегда доходит.
+ */
+function debounce<T extends (...args: any[]) => void>(
+  fn: T,
+  delay: number,
+): (...args: Parameters<T>) => void {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  return (...args: Parameters<T>) => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      fn(...args);
+      timer = null;
+    }, delay);
+  };
 }
 
 export function useExtensionState(): UseExtensionStateReturn {
@@ -66,32 +84,44 @@ export function useExtensionState(): UseExtensionStateReturn {
     return () => chrome.runtime.onMessage.removeListener(handleMessage);
   }, []);
 
-  // Update audio params via service worker
-  const updateParams = useCallback(async (partial: Partial<AudioParams>) => {
-    const current = stateRef.current;
-    const newParams: AudioParams = {
-      ...current.params,
-      ...partial,
-    };
+  // Debounced send to background — не чаще чем раз в 80мс
+  const debouncedSendParams = useRef(
+    debounce(async (params: AudioParams) => {
+      try {
+        await sendRuntimeMessage(Messages.updateParams(params));
+      } catch (error) {
+        console.error('[Popup] Failed to update params:', error);
+        // Revert on failure
+        setState((prev) => {
+          if (prev.params.speed !== params.speed || prev.params.pitch !== params.pitch) {
+            return { ...prev, params };
+          }
+          return prev;
+        });
+      }
+    }, 80),
+  ).current;
 
-    // Optimistic update
-    setState((prev) => ({
-      ...prev,
-      params: newParams,
-    }));
+  // Update audio params via service worker (debounced)
+  const updateParams = useCallback(
+    (partial: Partial<AudioParams>) => {
+      const current = stateRef.current;
+      const newParams: AudioParams = {
+        ...current.params,
+        ...partial,
+      };
 
-    // Send to background
-    try {
-      await sendRuntimeMessage(Messages.updateParams(newParams));
-    } catch (error) {
-      console.error('[Popup] Failed to update params:', error);
-      // Revert on failure
+      // Optimistic update immediately (UI stays responsive)
       setState((prev) => ({
         ...prev,
-        params: current.params,
+        params: newParams,
       }));
-    }
-  }, []);
+
+      // Debounced send to background
+      debouncedSendParams(newParams);
+    },
+    [debouncedSendParams],
+  );
 
   // Request full state from service worker
   const requestState = useCallback(async () => {

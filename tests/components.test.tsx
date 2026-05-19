@@ -92,36 +92,46 @@ describe('KeyDisplay', () => {
 });
 
 describe('SpeedSlider', () => {
-  it('should render with correct initial value (default 120 BPM)', () => {
+  it('should render with correct initial value (shows multiplier when no BPM)', () => {
     const onChange = vi.fn();
 
-    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+    const { container } = render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
 
     const slider = screen.getByRole('slider');
     expect(slider).toBeInTheDocument();
     expect(slider).not.toBeDisabled();
     expect(slider).toHaveValue('1');
-    // Default base BPM = 120, speed 1.0 → 120 BPM
-    expect(screen.getByText('120')).toBeInTheDocument();
-    expect(screen.getByText('BPM')).toBeInTheDocument();
+    // Без BPM показываем множитель, не "120 BPM"
+    // Ищем display label (span с классом tabular-nums) через container
+    const displayLabel = container.querySelector('span.tabular-nums');
+    expect(displayLabel).toBeInTheDocument();
+    expect(displayLabel?.textContent).toBe('1.00x');
+    // Убеждаемся что нет "120 BPM"
+    expect(screen.queryByText('120')).not.toBeInTheDocument();
   });
 
-  it('should display correct BPM when value changes', () => {
+  it('should display multiplier label when value changes and no BPM known', () => {
     const onChange = vi.fn();
 
-    render(<SpeedSlider value={1.5} onChange={onChange} disabled={false} />);
+    const { container } = render(<SpeedSlider value={1.5} onChange={onChange} disabled={false} />);
 
-    // 120 * 1.5 = 180 BPM
-    expect(screen.getByText('180')).toBeInTheDocument();
+    // Без BPM показываем 1.50x, а не 180 BPM
+    const displayLabel = container.querySelector('span.tabular-nums');
+    expect(displayLabel).toBeInTheDocument();
+    expect(displayLabel?.textContent).toBe('1.50x');
   });
 
   it('should display computed BPM when original BPM is known', () => {
     const onChange = vi.fn();
 
-    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} bpm={140} />);
+    const { container } = render(
+      <SpeedSlider value={1.0} onChange={onChange} disabled={false} bpm={140} />,
+    );
 
-    // 140 * 1.0 = 140 BPM
-    expect(screen.getByText('140')).toBeInTheDocument();
+    // 140 * 1.0 = 140 BPM — текст отображается как "140 BPM" в одном span
+    const displayLabel = container.querySelector('span.tabular-nums');
+    expect(displayLabel).toBeInTheDocument();
+    expect(displayLabel?.textContent).toBe('140 BPM');
   });
 
   it('should be disabled when disabled prop is true', () => {
@@ -141,20 +151,29 @@ describe('SpeedSlider', () => {
     expect(screen.getByText('+1 BPM')).toBeInTheDocument();
   });
 
-  it('should call onChange with adjusted speed when +1 BPM clicked', () => {
+  it('should not call onChange when +1 BPM clicked without known BPM (buttons disabled)', () => {
     const onChange = vi.fn();
 
     render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+
+    fireEvent.click(screen.getByText('+1 BPM'));
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it('should call onChange with adjusted speed when +1 BPM clicked and BPM known', () => {
+    const onChange = vi.fn();
+
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} bpm={120} />);
 
     // 120 * 1.0 = 120 BPM, +1 → 121 BPM → 121/120 ≈ 1.0083
     fireEvent.click(screen.getByText('+1 BPM'));
     expect(onChange).toHaveBeenCalledWith(121 / 120);
   });
 
-  it('should call onChange with adjusted speed when −1 BPM clicked', () => {
+  it('should call onChange with adjusted speed when −1 BPM clicked and BPM known', () => {
     const onChange = vi.fn();
 
-    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} />);
+    render(<SpeedSlider value={1.0} onChange={onChange} disabled={false} bpm={120} />);
 
     // 120 * 1.0 = 120 BPM, -1 → 119 BPM → 119/120 ≈ 0.9917
     fireEvent.click(screen.getByText('−1 BPM'));

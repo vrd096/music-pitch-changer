@@ -8,16 +8,15 @@ interface SpeedSliderProps {
   bpm?: number | null;
 }
 
-const DEFAULT_BASE_BPM = 120;
-
 export const SpeedSlider: React.FC<SpeedSliderProps> = ({
   value,
   onChange,
   disabled = false,
   bpm = null,
 }) => {
-  const baseBpm = bpm ?? DEFAULT_BASE_BPM;
-  const currentBpm = Math.round(baseBpm * value);
+  // Показываем computed BPM только когда BPM определён, иначе — ratio
+  const displayLabel =
+    bpm !== null && bpm !== undefined ? `${Math.round(bpm * value)} BPM` : `${value.toFixed(2)}x`;
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -32,27 +31,27 @@ export const SpeedSlider: React.FC<SpeedSliderProps> = ({
 
   const adjustBpm = useCallback(
     (delta: number) => {
-      const newBpm = currentBpm + delta;
-      const newSpeed = Math.max(0.5, Math.min(2.0, newBpm / baseBpm));
+      if (bpm === null || bpm === undefined) return;
+      const step = delta / bpm; // 1 BPM change → speed delta
+      const newSpeed = Math.max(0.5, Math.min(2.0, value + step));
       onChange(newSpeed);
     },
-    [currentBpm, baseBpm, onChange],
+    [bpm, value, onChange],
   );
 
   // Calculate percentage for visual feedback
   const percent = ((value - 0.5) / (2.0 - 0.5)) * 100;
 
-  const canDecrease = useMemo(() => currentBpm > Math.round(baseBpm * 0.5), [currentBpm, baseBpm]);
-  const canIncrease = useMemo(() => currentBpm < Math.round(baseBpm * 2.0), [currentBpm, baseBpm]);
+  // +/- BPM buttons работают только когда BPM определён
+  const canDecrease = useMemo(() => bpm !== null && bpm !== undefined && value > 0.5, [bpm, value]);
+  const canIncrease = useMemo(() => bpm !== null && bpm !== undefined && value < 2.0, [bpm, value]);
 
   return (
     <div className={`transition-opacity ${disabled ? 'opacity-40' : ''}`}>
       <div className="flex items-center justify-between mb-2">
         <label className="text-xs font-medium text-slate-400 uppercase tracking-wider">Speed</label>
         <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-slate-200 tabular-nums">
-            {currentBpm} <span className="text-[10px] text-slate-500 font-normal">BPM</span>
-          </span>
+          <span className="text-sm font-semibold text-slate-200 tabular-nums">{displayLabel}</span>
           <button
             onClick={handleReset}
             disabled={disabled || value === 1.0}
@@ -78,9 +77,9 @@ export const SpeedSlider: React.FC<SpeedSliderProps> = ({
           }}
         />
         <div className="flex justify-between text-[10px] text-slate-600 mt-1">
-          <span>{Math.round(baseBpm * 0.5)} BPM</span>
-          <span>{baseBpm} BPM</span>
-          <span>{Math.round(baseBpm * 2.0)} BPM</span>
+          <span>0.50x</span>
+          <span>1.00x</span>
+          <span>2.00x</span>
         </div>
       </div>
       {/* +/- Buttons */}

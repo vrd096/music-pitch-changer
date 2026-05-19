@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && npm run build:worklets && npm run build:postprocess",
-    "build:worklets": "set VITE_ENTRY=pitch-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=key-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=capture-processor&& vite build --config vite.worklets.config.ts",
+    "build:worklets": "set VITE_ENTRY=capture-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=pitch-processor&& vite build --config vite.worklets.config.ts && set VITE_ENTRY=key-processor&& vite build --config vite.worklets.config.ts",
     "build:all": "vite build && npm run build:worklets && npm run build:postprocess",
     "build:postprocess": "if exist dist\\src (copy dist\\src\\popup.html dist\\popup.html && copy dist\\src\\offscreen.html dist\\offscreen.html && rmdir /S /Q dist\\src) && (copy /Y src\\manifest.json dist\\manifest.json) && (if not exist dist\\icons xcopy /E /I /Y public\\icons dist\\icons\\)",
     "preview": "vite preview",
@@ -16,9 +16,11 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@soundtouchjs/audio-worklet": "^2.0.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "realtime-bpm-analyzer": "^5.0.13"
+    "realtime-bpm-analyzer": "^5.0.13",
+    "rubberband-wasm": "^3.3.0"
   },
   "devDependencies": {
     "@testing-library/dom": "^10.4.1",

@@ -258,8 +258,8 @@ export class AudioEngine {
     if (!this.ctx) throw new Error('AudioContext not initialized');
 
     // key-processor.js загружать не нужно — KeyAnalyzer работает на main thread
-    // (см. key-analyzer.ts). Worklet загружается только если ключ детектится
-    // внутри AudioWorklet (запасной вариант / будущая оптимизация).
+    // (см. key-analyzer.ts).
+    // pitch-processor — кастомный WSOLA AudioWorkletProcessor с независимым speed + pitch
     const worklets = [
       { name: 'capture-processor', file: '/worklets/capture-processor.js' },
       { name: 'pitch-processor', file: '/worklets/pitch-processor.js' },
@@ -339,16 +339,20 @@ export class AudioEngine {
     //    (Инициализируются в init() до вызова upgradeGraph())
     //    CaptureProcessor отправляет аудио-чанки через port.onmessage (см. выше).
 
-    // 3. Pitch shifting node
+    // 3. Pitch node — кастомный WSOLA AudioWorkletProcessor (независимые speed + pitch)
+    //    Управляется через port.postMessage, а не AudioParam.
     try {
       this.pitchNode = new AudioWorkletNode(this.ctx, 'pitch-processor', {
         numberOfInputs: 1,
         numberOfOutputs: 1,
-        channelCount: 2,
-        channelCountMode: 'explicit',
-        channelInterpretation: 'speakers',
-        processorOptions: { sampleRate: this.ctx.sampleRate },
+        outputChannelCount: [2],
       });
+      // Принимаем диагностические сообщения от процессора
+      this.pitchNode.port.onmessage = (event: MessageEvent) => {
+        if (event.data?.type === 'pp-log') {
+          console.log('[PP]', event.data.text);
+        }
+      };
     } catch (e) {
       console.warn('[AE] Pitch worklet node creation failed:', e);
     }
@@ -388,11 +392,12 @@ export class AudioEngine {
 
     if (!this.pitchNode) return;
 
+    // Send params via port.postMessage — pitch-processor применяет их независимо:
+    // speed → time-stretch (WSOLA grain hop), pitch → pitch-shift (resampling)
     this.pitchNode.port.postMessage({
-      type: 'param',
-      speed: params.speed,
-      pitch: params.pitch,
-      bypass: params.bypass,
+      type: 'params',
+      speed: params.bypass ? 1.0 : params.speed,
+      pitch: params.bypass ? 0 : params.pitch,
     });
   }
 
